@@ -22,8 +22,4 @@ subdir('include')
 
 # Build library
 subdir('src')
-
-# Examples building
-if get_option('enable_examples')
-  subdir('example')
-endif
+subdir('example')
