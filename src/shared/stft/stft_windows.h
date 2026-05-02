@@ -29,11 +29,12 @@ typedef struct StftWindows StftWindows;
 
 typedef enum WindowPlace { INPUT_WINDOW = 1, OUTPUT_WINDOW = 2 } WindowPlace;
 
-StftWindows *stft_window_initialize(uint32_t stft_frame_size,
-                                    uint32_t overlap_factor,
+StftWindows* stft_window_initialize(uint32_t stft_fft_size,
+                                    uint32_t stft_frame_size,
+                                    uint32_t stft_hop_size,
                                     WindowTypes input_window,
                                     WindowTypes output_window);
-void stft_window_free(StftWindows *self);
-bool stft_window_apply(StftWindows *self, float *frame, WindowPlace place);
+void stft_window_free(StftWindows* self);
+bool stft_window_apply(StftWindows* self, float* frame, WindowPlace place);
 
 #endif

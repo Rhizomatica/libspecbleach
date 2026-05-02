@@ -21,31 +21,32 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #ifndef SPECTRAL_DENOISER_H
 #define SPECTRAL_DENOISER_H
 
-#include "../../interfaces/spectral_processor.h"
-#include "../../shared/noise_estimation/noise_profile.h"
+#include "shared/denoiser_logic/core/noise_profile.h"
+#include "shared/spectral_processor.h"
 #include <stdbool.h>
 #include <stdint.h>
 
 typedef struct DenoiserParameters {
   float reduction_amount;
-  int noise_scaling_type;
-  float noise_rescale;
   bool residual_listen;
-  bool transient_protection;
   int learn_noise;
   float smoothing_factor;
   float whitening_factor;
-  float post_filter_threshold;
+  int adaptive_noise;
+  int noise_estimation_method; /**< 0=SPP-MMSE, 1=Brandt, 2=Martin MS */
+  float masking_depth;
+  float suppression_strength;
+  float aggressiveness;  /**< -1.0 (Median/Min) to 1.0 (Max), 0.0 (Mean) */
+  float tonal_reduction; /**< 0.0 to 1.0 (Phase 3) */
 } DenoiserParameters;
 
-SpectralProcessorHandle
-spectral_denoiser_initialize(uint32_t sample_rate, uint32_t fft_size,
-                             uint32_t overlap_factor,
-                             NoiseProfile *noise_profile);
+SpectralProcessorHandle spectral_denoiser_initialize(
+    uint32_t sample_rate, uint32_t fft_size, uint32_t overlap_factor,
+    NoiseProfile* noise_profile);
 void spectral_denoiser_free(SpectralProcessorHandle instance);
 bool load_reduction_parameters(SpectralProcessorHandle instance,
                                DenoiserParameters parameters);
 bool spectral_denoiser_run(SpectralProcessorHandle instance,
-                           float *fft_spectrum);
+                           float* fft_spectrum);
 
 #endif

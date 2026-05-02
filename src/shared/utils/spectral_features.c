@@ -23,31 +23,43 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <stdlib.h>
 
 struct SpectralFeatures {
-  float *power_spectrum;
-  float *phase_spectrum;
-  float *magnitude_spectrum;
+  float* power_spectrum;
+  float* phase_spectrum;
+  float* magnitude_spectrum;
 
   uint32_t real_spectrum_size;
 };
 
-SpectralFeatures *
-spectral_features_initialize(const uint32_t real_spectrum_size) {
-  SpectralFeatures *self =
-      (SpectralFeatures *)calloc(1U, sizeof(SpectralFeatures));
+SpectralFeatures* spectral_features_initialize(
+    const uint32_t real_spectrum_size) {
+  SpectralFeatures* self =
+      (SpectralFeatures*)calloc(1U, sizeof(SpectralFeatures));
+  if (!self) {
+    return NULL;
+  }
 
   self->real_spectrum_size = real_spectrum_size;
 
   self->power_spectrum =
-      (float *)calloc(self->real_spectrum_size, sizeof(float));
+      (float*)calloc(self->real_spectrum_size, sizeof(float));
   self->phase_spectrum =
-      (float *)calloc(self->real_spectrum_size, sizeof(float));
+      (float*)calloc(self->real_spectrum_size, sizeof(float));
   self->magnitude_spectrum =
-      (float *)calloc(self->real_spectrum_size, sizeof(float));
+      (float*)calloc(self->real_spectrum_size, sizeof(float));
+
+  if (!self->power_spectrum || !self->phase_spectrum ||
+      !self->magnitude_spectrum) {
+    spectral_features_free(self);
+    return NULL;
+  }
 
   return self;
 }
 
-void spectral_features_free(SpectralFeatures *self) {
+void spectral_features_free(SpectralFeatures* self) {
+  if (!self) {
+    return;
+  }
   free(self->power_spectrum);
   free(self->phase_spectrum);
   free(self->magnitude_spectrum);
@@ -55,125 +67,123 @@ void spectral_features_free(SpectralFeatures *self) {
   free(self);
 }
 
-float *get_power_spectrum(SpectralFeatures *self) {
+float* get_power_spectrum(SpectralFeatures* self) {
   return self->power_spectrum;
 }
-float *get_magnitude_spectrum(SpectralFeatures *self) {
+float* get_magnitude_spectrum(SpectralFeatures* self) {
   return self->magnitude_spectrum;
 }
-float *get_phase_spectrum(SpectralFeatures *self) {
+float* get_phase_spectrum(SpectralFeatures* self) {
   return self->phase_spectrum;
 }
 
-static bool compute_power_spectrum(SpectralFeatures *self,
-                                   const float *fft_spectrum,
+static bool compute_power_spectrum(SpectralFeatures* self,
+                                   const float* fft_spectrum,
                                    const uint32_t fft_spectrum_size) {
   if (!self || !fft_spectrum || !fft_spectrum_size) {
     return false;
   }
 
-  float real_bin = fft_spectrum[0];
+  const uint32_t n = fft_spectrum_size;
+  const uint32_t n2 = n / 2U;
+  const bool is_even = (n % 2U == 0);
 
-  self->power_spectrum[0] = real_bin * real_bin;
+  // DC bin
+  self->power_spectrum[0] = fft_spectrum[0] * fft_spectrum[0];
 
-  for (uint32_t k = 1U; k < self->real_spectrum_size; k++) {
-    float power = 0.F;
+  // Complex bins
+  for (uint32_t k = 1U; k < n2; k++) {
+    float real = fft_spectrum[k];
+    float imag = fft_spectrum[n - k];
+    self->power_spectrum[k] = (real * real) + (imag * imag);
+  }
 
-    real_bin = fft_spectrum[k];
-    float imag_bin = fft_spectrum[fft_spectrum_size - k];
-
-    if (k < self->real_spectrum_size) {
-      power = (real_bin * real_bin + imag_bin * imag_bin);
-    } else {
-      power = real_bin * real_bin;
-    }
-
-    self->power_spectrum[k] = power;
+  // Nyquist bin
+  if (is_even) {
+    self->power_spectrum[n2] = fft_spectrum[n2] * fft_spectrum[n2];
   }
 
   return true;
 }
 
-static bool compute_magnitude_spectrum(SpectralFeatures *self,
-                                       const float *fft_spectrum,
+static bool compute_magnitude_spectrum(SpectralFeatures* self,
+                                       const float* fft_spectrum,
                                        const uint32_t fft_spectrum_size) {
   if (!self || !fft_spectrum || !fft_spectrum_size) {
     return false;
   }
 
-  float real_bin = fft_spectrum[0];
+  const uint32_t n = fft_spectrum_size;
+  const uint32_t n2 = n / 2U;
+  const bool is_even = (n % 2U == 0);
 
-  self->magnitude_spectrum[0] = real_bin;
+  // DC bin
+  self->magnitude_spectrum[0] = fabsf(fft_spectrum[0]);
 
-  for (uint32_t k = 1U; k < self->real_spectrum_size; k++) {
-    float magnitude = 0.F;
+  // Complex bins
+  for (uint32_t k = 1U; k < n2; k++) {
+    self->magnitude_spectrum[k] = hypotf(fft_spectrum[k], fft_spectrum[n - k]);
+  }
 
-    real_bin = fft_spectrum[k];
-    float imag_bin = fft_spectrum[fft_spectrum_size - k];
-
-    if (k < self->real_spectrum_size) {
-      magnitude = sqrtf(real_bin * real_bin + imag_bin * imag_bin);
-
-    } else {
-      magnitude = real_bin;
-    }
-
-    self->magnitude_spectrum[k] = magnitude;
+  // Nyquist bin
+  if (is_even) {
+    self->magnitude_spectrum[n2] = fabsf(fft_spectrum[n2]);
   }
 
   return true;
 }
 
-static bool compute_phase_spectrum(SpectralFeatures *self,
-                                   const float *fft_spectrum,
+static bool compute_phase_spectrum(SpectralFeatures* self,
+                                   const float* fft_spectrum,
                                    const uint32_t fft_spectrum_size) {
   if (!self || !fft_spectrum || !fft_spectrum_size) {
     return false;
   }
 
-  float real_bin = fft_spectrum[0];
-  self->phase_spectrum[0] = atan2f(real_bin, 0.F);
+  const uint32_t n = fft_spectrum_size;
+  const uint32_t n2 = n / 2U;
+  const bool is_even = (n % 2U == 0);
 
-  for (uint32_t k = 1U; k < self->real_spectrum_size; k++) {
-    float phase = 0.F;
+  // DC bin - purely real
+  self->phase_spectrum[0] = atan2f(0.F, fft_spectrum[0]);
 
-    real_bin = fft_spectrum[k];
-    float imag_bin = fft_spectrum[fft_spectrum_size - k];
+  // Complex bins
+  for (uint32_t k = 1U; k < n2; k++) {
+    float real = fft_spectrum[k];
+    float imag = fft_spectrum[n - k];
+    self->phase_spectrum[k] = atan2f(imag, real);
+  }
 
-    if (k < self->real_spectrum_size) {
-      phase = atan2f(real_bin, imag_bin);
-    } else {
-      phase = atan2f(real_bin, 0.F);
-    }
-
-    self->phase_spectrum[k] = phase;
+  // Nyquist bin - purely real
+  if (is_even) {
+    self->phase_spectrum[n2] = atan2f(0.F, fft_spectrum[n2]);
   }
 
   return true;
 }
 
-float *get_spectral_feature(SpectralFeatures *self, const float *fft_spectrum,
+float* get_spectral_feature(SpectralFeatures* self, const float* fft_spectrum,
                             uint32_t fft_spectrum_size, SpectrumType type) {
-  if (!self || !fft_spectrum || fft_spectrum_size <= 0U) {
+  if (!self || !fft_spectrum || fft_spectrum_size == 0U) {
     return NULL;
   }
 
   switch (type) {
-  case POWER_SPECTRUM:
-    compute_power_spectrum(self, fft_spectrum, fft_spectrum_size);
-    return get_power_spectrum(self);
-    break;
-  case MAGNITUDE_SPECTRUM:
-    compute_magnitude_spectrum(self, fft_spectrum, fft_spectrum_size);
-    return get_magnitude_spectrum(self);
-    break;
-  case PHASE_SPECTRUM:
-    compute_phase_spectrum(self, fft_spectrum, fft_spectrum_size);
-    return get_phase_spectrum(self);
-    break;
+    case POWER_SPECTRUM:
+      compute_power_spectrum(self, fft_spectrum, fft_spectrum_size);
+      return get_power_spectrum(self);
+      break;
+    case MAGNITUDE_SPECTRUM:
+      compute_magnitude_spectrum(self, fft_spectrum, fft_spectrum_size);
+      return get_magnitude_spectrum(self);
+      break;
+    case PHASE_SPECTRUM:
+      compute_phase_spectrum(self, fft_spectrum, fft_spectrum_size);
+      return get_phase_spectrum(self);
+      break;
 
-  default:
-    return NULL;
-    break;
+    default:
+      return NULL;
+      break;
   }
 }

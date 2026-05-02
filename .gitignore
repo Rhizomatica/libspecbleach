@@ -52,10 +52,25 @@ Mkfile.old
 dkms.conf
 
 # Builds
-build/
+build*/
+compile_commands.json
+.ninja_*
+meson-*/
+
+# Test outputs (temporary files generated during testing)
+tests/test_data/*_output.wav
+tests/test_data/*_processed.wav
+tests/test_data/*_denoised.wav
 
 # Valgrind dumps
 *.valgrind
 
-# Vscode files
+# IDE files
 .vscode/
+.cursor/
+.cache/
+.agent/
+
+# Other files
+*.log
+.DS_Store
