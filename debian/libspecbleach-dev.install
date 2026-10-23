@@ -1,0 +1,4 @@
+usr/include/*
+usr/lib/*/libspecbleach.so
+usr/lib/*/pkgconfig/*
+usr/lib/*/cmake/*

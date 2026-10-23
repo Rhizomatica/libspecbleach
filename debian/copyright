@@ -1,0 +1,29 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: libspecbleach
+Upstream-Contact: Luciano Dato <lucianodato@gmail.com>
+Source: https://github.com/lucianodato/libspecbleach
+
+Files: *
+Copyright: 2022-2026 Luciano Dato <lucianodato@gmail.com>
+License: LGPL-2.1+
+
+Files: thirdparty/pffft/*
+Copyright: 2020 Dario Mambro <dario.mambro@gmail.com>
+           2019 Hayati Ayguen <h_ayguen@web.de>
+           2013 Julien Pommier <pommier@modartt.com>
+           2004 the University Corporation for Atmospheric Research ("UCAR")
+License: BSD-like-FFTPACK
+ See thirdparty/pffft/LICENSE.txt in the source.
+
+Files: debian/*
+Copyright: 2024-2026 Rafael Diniz <rafael@riseup.net>
+License: LGPL-2.1+
+
+License: LGPL-2.1+
+ This library is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation; either version 2.1 of the License, or (at
+ your option) any later version.
+ .
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 2.1 can be found in "/usr/share/common-licenses/LGPL-2.1".

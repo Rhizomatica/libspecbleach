@@ -1,0 +1,37 @@
+Source: libspecbleach
+Section: libs
+Priority: optional
+Maintainer: Rafael Diniz <rafael@riseup.net>
+Rules-Requires-Root: no
+Build-Depends:
+ debhelper-compat (= 13),
+ cmake (>= 3.22),
+ pkg-config,
+Standards-Version: 4.7.2
+Homepage: https://github.com/lucianodato/libspecbleach
+Vcs-Browser: https://github.com/Rhizomatica/libspecbleach
+Vcs-Git: https://github.com/Rhizomatica/libspecbleach.git
+
+Package: libspecbleach-dev
+Section: libdevel
+Architecture: any
+Multi-Arch: same
+Depends:
+ libspecbleach0 (= ${binary:Version}),
+ ${misc:Depends},
+Description: spectral noise reduction library (development files)
+ libspecbleach is a C library for audio noise reduction and other spectral
+ effects, based on spectral subtraction with adaptive noise estimation.
+ .
+ This package contains the headers, the pkg-config file and the CMake
+ package configuration.
+
+Package: libspecbleach0
+Architecture: any
+Multi-Arch: same
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Description: spectral noise reduction library
+ libspecbleach is a C library for audio noise reduction and other spectral
+ effects, based on spectral subtraction with adaptive noise estimation.

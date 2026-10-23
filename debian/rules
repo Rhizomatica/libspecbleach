@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	dh_auto_configure -- -DENABLE_TESTS=ON -DENABLE_EXAMPLES=OFF
+
+# Upstream is at 0.x and may change the ABI under the same SONAME: whatever
+# builds against this version needs at least it.
+override_dh_makeshlibs:
+	dh_makeshlibs -V
