@@ -1,4 +1,24 @@
 /*
+libspecbleach - A spectral processing library
+
+Copyright 2022 Luciano Dato <lucianodato@gmail.com>
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+/*
  * Unit tests for NLM Filter (Non-Local Means)
  */
 
@@ -257,7 +277,7 @@ void test_nlm_filter_reset(void) {
 }
 
 void test_nlm_filter_h_parameter(void) {
-  printf("Testing NLM filter h parameter update...\n");
+  printf("Testing NLM filter h parameter update and bypass...\n");
 
   NlmFilterConfig config = {
       .spectrum_size = 32,
@@ -268,10 +288,14 @@ void test_nlm_filter_h_parameter(void) {
   NlmFilter* filter = nlm_filter_initialize(config);
   TEST_ASSERT(filter != NULL, "NLM filter initialization should succeed");
 
-  // Update h parameter
+  // Update h parameter to 2.5
   nlm_filter_set_h_parameter(filter, 2.5f);
 
-  float input[32] = {0.0f};
+  float input[32];
+  for (int i = 0; i < 32; i++) {
+    input[i] = (float)(i + 1);
+  }
+
   // Push enough frames to fill the buffer
   for (int i = 0; i < 3; i++) {
     nlm_filter_push_frame(filter, input);
@@ -280,6 +304,14 @@ void test_nlm_filter_h_parameter(void) {
   float output[32];
   TEST_ASSERT(nlm_filter_process(filter, output),
               "Process should succeed after h parameter update");
+
+  // Update h parameter to 0.0 (bypass mode)
+  nlm_filter_set_h_parameter(filter, 0.0f);
+  TEST_ASSERT(nlm_filter_process(filter, output),
+              "Process should succeed with h=0.0f bypass");
+  for (int i = 0; i < 32; i++) {
+    TEST_FLOAT_CLOSE(output[i], input[i], 1e-6f);
+  }
 
   nlm_filter_free(filter);
   printf("✓ NLM filter h parameter tests passed\n");
@@ -427,26 +459,37 @@ void test_nlm_filter_process_patch8(void) {
   printf("✓ NLM filter patch_size=8 process tests passed\n");
 }
 
-void test_nlm_filter_omp_config(void) {
-  printf("Testing NLM filter OpenMP configuration...\n");
-
-  // Set OMP_NUM_THREADS env var
-  setenv("OMP_NUM_THREADS", "2", 1);
+void test_nlm_filter_thread_config(void) {
+  printf("Testing NLM filter threading configuration...\n");
 
   NlmFilterConfig config = {.spectrum_size = 32};
   NlmFilter* filter = nlm_filter_initialize(config);
   TEST_ASSERT(filter != NULL, "Initialization failed");
-
-  // On many platforms this will trigger the env-reading logic in nlm_filter.c
-  TEST_ASSERT(filter->num_threads == 2,
-              "Filter should respect OMP_NUM_THREADS env var");
-
+  TEST_ASSERT(filter->context.num_threads == NLM_NUM_THREADS_DEFAULT,
+              "Zero thread count should fall back to default");
   nlm_filter_free(filter);
 
-  // Clean up
-  unsetenv("OMP_NUM_THREADS");
+  NlmFilterConfig single_config = {.spectrum_size = 32, .num_threads = 1};
+  NlmFilter* single_filter = nlm_filter_initialize(single_config);
+  TEST_ASSERT(single_filter != NULL, "Single-threaded initialization failed");
+  TEST_ASSERT(single_filter->context.num_threads == 1U,
+              "Thread count should be 1");
+  TEST_ASSERT(single_filter->context.pool == NULL,
+              "Single-threaded filter should not create a worker pool");
+  nlm_filter_free(single_filter);
 
-  printf("✓ NLM filter OpenMP configuration tests passed\n");
+  NlmFilterConfig multi_config = {.spectrum_size = 32, .num_threads = 3};
+  NlmFilter* multi_filter = nlm_filter_initialize(multi_config);
+  TEST_ASSERT(multi_filter != NULL, "Multi-threaded initialization failed");
+  TEST_ASSERT(multi_filter->context.num_threads == 3U,
+              "Thread count should be 3");
+  TEST_ASSERT(multi_filter->context.pool != NULL,
+              "Multi-threaded filter should create a worker pool");
+  TEST_ASSERT(sb_thread_pool_num_workers(multi_filter->context.pool) == 2U,
+              "Pool should have num_threads - 1 workers");
+  nlm_filter_free(multi_filter);
+
+  printf("✓ NLM filter threading configuration tests passed\n");
 }
 
 void test_nlm_filter_snr_and_reconstruct(void) {
@@ -465,21 +508,21 @@ void test_nlm_filter_snr_and_reconstruct(void) {
 
   nlm_filter_calculate_snr(filter, reference, noise, snr);
 
-  TEST_FLOAT_CLOSE(snr[0], 5.0f, 1e-4f);
-  TEST_FLOAT_CLOSE(snr[1], 2.0f, 1e-4f);
+  TEST_FLOAT_CLOSE(snr[0], sqrtf(5.0f), 1e-4f);
+  TEST_FLOAT_CLOSE(snr[1], sqrtf(2.0f), 1e-4f);
   TEST_ASSERT(snr[2] == 0.0f, "Zero reference with zero noise should be 0 SNR");
-  TEST_ASSERT(snr[3] > 1000.0f,
+  TEST_ASSERT(snr[3] > 30.0f,
               "High reference with zero noise should produce large SNR");
 
   float reconstructed[4] = {0.0f};
-  float smoothed_snr[4] = {5.0f, 2.0f, 1.0f, 10.0f};
+  float smoothed_snr[4] = {sqrtf(5.0f), sqrtf(2.0f), 1.0f, 10.0f};
 
   nlm_filter_reconstruct_magnitude(filter, smoothed_snr, noise, reconstructed);
 
-  TEST_FLOAT_CLOSE(reconstructed[0], 10.0f, 1e-4f); // 5 * 2
-  TEST_FLOAT_CLOSE(reconstructed[1], 20.0f, 1e-4f); // 2 * 10
-  TEST_FLOAT_CLOSE(reconstructed[2], 0.0f, 1e-4f);  // 1 * epsilon ~ 0
-  TEST_FLOAT_CLOSE(reconstructed[3], 0.0f, 1e-4f);  // 10 * epsilon ~ 0
+  TEST_FLOAT_CLOSE(reconstructed[0], 10.0f, 1e-4f); // (sqrt(5))^2 * 2
+  TEST_FLOAT_CLOSE(reconstructed[1], 20.0f, 1e-4f); // (sqrt(2))^2 * 10
+  TEST_FLOAT_CLOSE(reconstructed[2], 0.0f, 1e-4f);  // 1^2 * epsilon ~ 0
+  TEST_FLOAT_CLOSE(reconstructed[3], 0.0f, 1e-4f);  // 10^2 * epsilon ~ 0
 
   // Null testing
   nlm_filter_calculate_snr(NULL, reference, noise, snr);
@@ -516,13 +559,13 @@ void test_nlm_filter_frame_cache(void) {
   }
 
   // Precompute cache
-  populate_frame_ptrs(filter);
+  patch_filter_context_populate_frame_ptrs(&filter->context);
 
   // Check offsets in cache range (-past-4 to +future+4)
   // For past=8, future=8, range is -12 to 12.
   for (int32_t dt = -12; dt <= 12; dt++) {
-    float* cached = cached_get_frame(filter, dt);
-    float* direct = get_frame(filter, dt);
+    float* cached = patch_filter_context_cached_get_frame(&filter->context, dt);
+    float* direct = patch_filter_context_get_frame(&filter->context, dt);
     TEST_ASSERT(cached == direct, "Cached pointer should match direct lookup");
   }
 
@@ -545,7 +588,7 @@ int main(void) {
   test_nlm_filter_null_handling();
   test_nlm_filter_snr_and_reconstruct();
   test_nlm_filter_frame_cache();
-  test_nlm_filter_omp_config();
+  test_nlm_filter_thread_config();
 
   printf("\n✅ All NLM filter tests passed!\n");
   return 0;

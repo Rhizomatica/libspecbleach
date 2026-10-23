@@ -21,13 +21,15 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include "shared/denoiser_logic/processing/gain_calculator.h"
 #include "shared/configurations.h"
 #include "shared/utils/simd_utils.h"
+#include "shared/utils/spectral_utils.h"
 #include <float.h>
 #include <math.h>
 
 static void wiener_subtraction(const uint32_t real_spectrum_size,
                                const uint32_t fft_size, const float* spectrum,
                                const float* noise_spectrum, const float* alpha,
-                               float* gain_spectrum) {
+                               float* gain_spectrum,
+                               const float* knee_spectrum) {
   uint32_t k = 0;
   sb_vec8_t flt_min = sb_set8(FLT_MIN);
   sb_vec8_t zero = sb_set8(0.0f);
@@ -39,10 +41,21 @@ static void wiener_subtraction(const uint32_t real_spectrum_size,
     sb_vec8_t a = sb_load8(alpha + k);
     sb_vec8_t scaled_noise = sb_mul8(n, a);
 
-    sb_vec8_t mask_noise = sb_gt8(scaled_noise, flt_min);
-    sb_vec8_t mask_gain = sb_gt8(s, scaled_noise);
+    // Soft knee: lift the numerator by knee*noise so bins slightly below the
+    // oversubtraction threshold keep a small positive gain (finite slope at
+    // the floor crossing instead of an abrupt cut). knee = 0 reproduces the
+    // plain subtraction curve.
+    sb_vec8_t knee_vec = knee_spectrum ? sb_load8(knee_spectrum + k) : zero;
+    sb_vec8_t knee_noise = sb_mul8(n, knee_vec);
+    sb_vec8_t denom = sb_add8(s, knee_noise);
 
-    sb_vec8_t gain = sb_div8(sb_sub8(s, scaled_noise), s);
+    sb_vec8_t mask_noise = sb_gt8(scaled_noise, flt_min);
+    sb_vec8_t mask_gain = sb_gt8(denom, scaled_noise);
+
+    sb_vec8_t safe_denom = sb_sel8(mask_gain, denom, one);
+    sb_vec8_t diff = sb_sel8(mask_gain, sb_sub8(denom, scaled_noise), zero);
+    sb_vec8_t power_gain = sb_div8(diff, safe_denom);
+    sb_vec8_t gain = sb_sqrt8(power_gain);
     gain = sb_sel8(mask_gain, gain, zero);
     gain = sb_sel8(mask_noise, gain, one);
 
@@ -50,10 +63,13 @@ static void wiener_subtraction(const uint32_t real_spectrum_size,
   }
 
   for (; k < real_spectrum_size; k++) {
+    float knee = knee_spectrum ? knee_spectrum[k] : 0.0F;
     float scaled_noise = noise_spectrum[k] * alpha[k];
     if (scaled_noise > FLT_MIN) {
-      if (spectrum[k] > scaled_noise) {
-        gain_spectrum[k] = (spectrum[k] - (scaled_noise)) / spectrum[k];
+      float denom = spectrum[k] + (noise_spectrum[k] * knee);
+      float diff = denom - scaled_noise;
+      if (diff > 0.0F) {
+        gain_spectrum[k] = sqrtf(diff / denom);
       } else {
         gain_spectrum[k] = 0.F;
       }
@@ -62,10 +78,7 @@ static void wiener_subtraction(const uint32_t real_spectrum_size,
     }
   }
 
-  // Symmetry
-  for (uint32_t i = 1U; i < real_spectrum_size && i < (fft_size - i); i++) {
-    gain_spectrum[fft_size - i] = gain_spectrum[i];
-  }
+  sb_apply_spectral_symmetry(gain_spectrum, real_spectrum_size, fft_size);
 }
 
 static void spectral_gating(const uint32_t real_spectrum_size,
@@ -105,10 +118,7 @@ static void spectral_gating(const uint32_t real_spectrum_size,
     }
   }
 
-  // Symmetry
-  for (uint32_t i = 1U; i < real_spectrum_size && i < (fft_size - i); i++) {
-    gain_spectrum[fft_size - i] = gain_spectrum[i];
-  }
+  sb_apply_spectral_symmetry(gain_spectrum, real_spectrum_size, fft_size);
 }
 
 static void generalized_spectral_subtraction(
@@ -117,9 +127,7 @@ static void generalized_spectral_subtraction(
     const float* alpha, const float* beta) {
   for (uint32_t k = 0U; k < real_spectrum_size; k++) {
     if (spectrum[k] > FLT_MIN) {
-      // Use multiplications instead of powf for exponent 2.0
-      float ratio = noise_spectrum[k] / spectrum[k];
-      float ratio_sq = ratio * ratio;
+      float ratio_sq = noise_spectrum[k] / spectrum[k];
       if (ratio_sq < (1.F / (alpha[k] + beta[k]))) {
         float val = fmaxf(1.F - (alpha[k] * ratio_sq), 0.0f);
         gain_spectrum[k] = fmaxf(sqrtf(val), 0.F);
@@ -132,29 +140,24 @@ static void generalized_spectral_subtraction(
     }
   }
 
-  // Symmetry
-  for (uint32_t i = 1U; i < real_spectrum_size && i < (fft_size - i); i++) {
-    gain_spectrum[fft_size - i] = gain_spectrum[i];
-  }
+  sb_apply_spectral_symmetry(gain_spectrum, real_spectrum_size, fft_size);
 }
 
-void calculate_gains(uint32_t real_spectrum_size, uint32_t fft_size,
-                     const float* spectrum, const float* noise_spectrum,
-                     float* gain_spectrum, const float* alpha,
-                     const float* beta, GainCalculationType type) {
-  switch (type) {
+void calculate_gains(GainCalcArgs args) {
+  switch (args.type) {
     case GATES:
-      spectral_gating(real_spectrum_size, fft_size, spectrum, noise_spectrum,
-                      alpha, gain_spectrum);
+      spectral_gating(args.real_spectrum_size, args.fft_size, args.spectrum,
+                      args.noise_spectrum, args.alpha, args.gain_spectrum);
       break;
     case WIENER:
-      wiener_subtraction(real_spectrum_size, fft_size, spectrum, noise_spectrum,
-                         alpha, gain_spectrum);
+      wiener_subtraction(args.real_spectrum_size, args.fft_size, args.spectrum,
+                         args.noise_spectrum, args.alpha, args.gain_spectrum,
+                         args.knee);
       break;
     case GENERALIZED_SPECTRALSUBTRACTION:
-      generalized_spectral_subtraction(real_spectrum_size, fft_size, spectrum,
-                                       noise_spectrum, gain_spectrum, alpha,
-                                       beta);
+      generalized_spectral_subtraction(
+          args.real_spectrum_size, args.fft_size, args.spectrum,
+          args.noise_spectrum, args.gain_spectrum, args.alpha, args.beta);
       break;
 
     default:

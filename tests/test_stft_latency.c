@@ -30,7 +30,7 @@ int main(void) {
   // Initialize STFT processor
   StftProcessor* processor =
       stft_processor_initialize(sample_rate, stft_frame_size, overlap_factor,
-                                NO_PADDING, 0, HANN_WINDOW, HANN_WINDOW);
+                                PAD_TO_VALID_SIZE, 0, HANN_WINDOW, HANN_WINDOW);
 
   assert(processor != NULL);
 
@@ -64,6 +64,14 @@ int main(void) {
   printf("  Latency = frame_size (%u samples)\n", latency);
   printf("  (Previously was incorrectly: frame_size - hop = %u samples)\n",
          old_incorrect_latency);
+
+  // Test getters and NULL safety
+  assert(get_stft_hop_size(processor) == expected_hop);
+  assert(get_stft_real_spectrum_size(processor) > 0);
+  assert(get_stft_real_spectrum_size(NULL) == 0);
+  assert(get_stft_latency(NULL) == 0);
+  assert(get_stft_hop_size(NULL) == 0);
+  assert(get_stft_fft_size(NULL) == 0);
 
   stft_processor_free(processor);
 

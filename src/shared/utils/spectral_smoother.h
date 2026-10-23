@@ -22,30 +22,36 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #define SPECTRAL_SMOOTHER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
-typedef enum TimeSmoothingType {
-  NO_SMOOTHING = 0,
-  FIXED = 1,
-  TRANSIENT_AWARE = 2,
-} TimeSmoothingType;
+typedef enum TimeSmoothingType { FIXED, TRANSIENT_AWARE } TimeSmoothingType;
 
 typedef struct TimeSmoothingParameters {
   float smoothing;
+  const float* transient_mask; // Optional per-bin percussive/transient weights
+                               // (0.0 to 1.0)
+  const float* release_scale;  // Optional per-bin release weight (0.0 = fast
+                               // close, 1.0 = full slider release); NULL = 1.0
 } TimeSmoothingParameters;
 
 typedef struct SpectralSmoother SpectralSmoother;
 
 SpectralSmoother* spectral_smoothing_initialize(uint32_t fft_size,
                                                 uint32_t sample_rate,
+                                                uint32_t overlap_factor,
                                                 TimeSmoothingType type);
 void spectral_smoothing_free(SpectralSmoother* self);
+
 bool spectral_smoothing_run(SpectralSmoother* self,
-                            TimeSmoothingParameters parameters,
-                            float* signal_spectrum);
+                            TimeSmoothingParameters parameters, float* gains);
 
 void spectral_smoothing_apply_spatial(float* data, uint32_t size);
 void spectral_smoothing_apply_simple_temporal(float* current, float* memory,
                                               uint32_t size, float smoothing);
 
-#endif
+/* Init-time only: use the true STFT hop (frame/overlap) for dt. */
+void spectral_smoothing_set_hop_samples(SpectralSmoother* self,
+                                        uint32_t hop_samples);
+
+#endif /* SPECTRAL_SMOOTHER_H */

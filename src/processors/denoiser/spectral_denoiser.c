@@ -1,343 +1,495 @@
-#include "spectral_denoiser.h"
+/*
+libspecbleach - A spectral processing library
+
+Copyright 2022 Luciano Dato <lucianodato@gmail.com>
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
 #include "shared/configurations.h"
-#include "shared/denoiser_logic/core/denoiser_post_process.h"
-#include "shared/denoiser_logic/core/denoiser_profile_core.h"
-#include "shared/denoiser_logic/core/noise_floor_manager.h"
 #include "shared/denoiser_logic/core/noise_profile.h"
-#include "shared/denoiser_logic/estimators/adaptive_noise_estimator.h"
-#include "shared/denoiser_logic/estimators/noise_estimator.h"
-#include "shared/denoiser_logic/processing/gain_calculator.h"
-#include "shared/denoiser_logic/processing/masking_veto.h"
-#include "shared/denoiser_logic/processing/suppression_engine.h"
-#include "shared/denoiser_logic/processing/tonal_reducer.h"
-#include "shared/utils/critical_bands.h"
-#include "shared/utils/spectral_features.h"
-#include "shared/utils/spectral_smoother.h"
-#include "shared/utils/spectral_utils.h"
-#include <float.h>
+#include "shared/stft/stft_processor.h"
+#include "specbleach_denoiser.h"
+#include "spectral_engine.h"
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct SbSpectralDenoiser {
-  uint32_t fft_size;
-  uint32_t real_spectrum_size;
-  uint32_t sample_rate;
+typedef struct specbleach_denoiser { // NOLINT(readability-identifier-naming)
   uint32_t hop;
-  float default_oversubtraction;
-  float default_undersubtraction;
-
-  float* gain_spectrum;
-  float* alpha;
-  float* beta;
-  float* noise_spectrum;
-  float* manual_noise_floor;
-
-  TonalReducer* tonal_reducer;
-
-  SpectrumType spectrum_type;
-  CriticalBandType band_type;
-  DenoiserParameters denoise_parameters;
-  GainCalculationType gain_calculation_type;
-  TimeSmoothingType time_smoothing_type;
-  NoiseEstimatorType noise_estimator_type;
-
-  NoiseEstimator* noise_estimator;
-  AdaptiveNoiseEstimator* adaptive_estimator;
+  uint32_t sample_rate;
+  float frame_size_ms;
+  uint32_t frame_size_samples;
+  uint32_t fft_size;
+  uint32_t init_flags;
+  StftProcessor* stft_processor;
   NoiseProfile* noise_profile;
-  SpectralFeatures* spectral_features;
-  SpectralSmoother* spectrum_smoothing;
-  NoiseFloorManager* noise_floor_manager;
-  MaskingVeto* masking_veto;
-  SuppressionEngine* suppression_engine;
+  SpectralProcessorHandle spectral_engine;
+  float* reduction_curve_copy;
+  uint32_t reduction_curve_capacity;
+} SbDenoiserInstance;
 
-  int last_adaptive_state;
-  int last_noise_estimation_method;
-  float aggressiveness;
-  bool was_learning;
-} SbSpectralDenoiser;
+static SpectralEngineParameters sanitize_engine_parameters(
+    const SpecbleachDenoiserParameters* parameters) {
+  int smoothing_mode;
+  switch (parameters->smoothing_mode) {
+    case SPECBLEACH_SMOOTHING_NLM_2D:
+    case SPECBLEACH_SMOOTHING_NLM_2D_DFTT:
+    case SPECBLEACH_SMOOTHING_BM3D:
+      smoothing_mode = (int)parameters->smoothing_mode;
+      break;
+    default:
+      smoothing_mode = SPECBLEACH_SMOOTHING_TEMPORAL;
+      break;
+  }
+  return (SpectralEngineParameters){
+      .learn_noise = (int)parameters->learn_noise,
+      .residual_listen = parameters->residual_listen,
+      .reduction_amount = fmaxf(0.0f, fminf(1.0f, parameters->reduction_gain)),
+      .smoothing_factor =
+          fmaxf(0.0f, fminf(1.0f, parameters->smoothing_factor)),
+      .whitening_factor =
+          fmaxf(0.0f, fminf(1.0f, parameters->whitening_factor)),
+      .adaptive_noise = parameters->adaptive_noise ? 1 : 0,
+      .noise_estimation_method = (int)parameters->noise_estimation_method,
+      .smoothing_mode = smoothing_mode,
+      .dftt_strength = parameters->dftt_strength > 0.0f
+                           ? fminf(parameters->dftt_strength, DFTT_STRENGTH_MAX)
+                           : 1.0f,
+      .masking_depth = fmaxf(0.0f, fminf(1.0f, parameters->masking_depth)),
+      .suppression_strength =
+          fmaxf(0.0f, fminf(1.0f, parameters->suppression_strength)),
+      .aggressiveness = fmaxf(-1.0f, fminf(1.0f, parameters->aggressiveness)),
+      .tonal_reduction =
+          fmaxf(0.0f, fminf(1.0f, parameters->tonal_reduction_gain)),
+      .reduction_blend =
+          fmaxf(0.0f, fminf(REDUCTION_BLEND_MAX, parameters->reduction_blend)),
+      .transient_protection_enable =
+          parameters->transient_protection_enable ? 1 : 0,
+      .noise_profile_offset_linear =
+          fmaxf(0.01f, fminf(100.0f, parameters->noise_profile_scale > 0.0f
+                                         ? parameters->noise_profile_scale
+                                         : 1.0f)),
+      .tonal_noise_profile_offset_linear = fmaxf(
+          0.01f, fminf(100.0f, parameters->tonal_noise_profile_scale > 0.0f
+                                   ? parameters->tonal_noise_profile_scale
+                                   : 1.0f)),
+      .reduction_curve_bias = NULL,
+      .reduction_curve_enabled = parameters->reduction_curve_enabled,
+  };
+}
 
-SpectralProcessorHandle spectral_denoiser_initialize(
-    const uint32_t sample_rate, const uint32_t fft_size,
-    const uint32_t overlap_factor, NoiseProfile* noise_profile) {
-
-  if (!noise_profile || sample_rate == 0 || fft_size == 0 ||
-      overlap_factor == 0) {
+static const float* curve_bias_copy(float** buffer, uint32_t* capacity,
+                                    const uint32_t required_size,
+                                    const bool enabled, const float* source) {
+  if (!buffer || !capacity || !enabled || !source || required_size == 0) {
     return NULL;
   }
 
-  SbSpectralDenoiser* self =
-      (SbSpectralDenoiser*)calloc(1U, sizeof(SbSpectralDenoiser));
+  if (!*buffer || *capacity < required_size) {
+    float* resized = (float*)realloc(*buffer, required_size * sizeof(float));
+    if (!resized) {
+      return NULL;
+    }
+    *buffer = resized;
+    *capacity = required_size;
+  }
+
+  memcpy(*buffer, source, required_size * sizeof(float));
+  return *buffer;
+}
+
+SpecbleachDenoiserParameters specbleach_denoiser_get_default_parameters(void) {
+  SpecbleachDenoiserParameters p;
+  memset(&p, 0, sizeof(p));
+  p.learn_noise = SPECBLEACH_LEARN_OFF;
+  p.residual_listen = false;
+  p.reduction_gain = 0.1f;
+  p.smoothing_factor = 0.5f;
+  p.smoothing_mode = SPECBLEACH_SMOOTHING_TEMPORAL;
+  p.whitening_factor = 0.0f;
+  p.adaptive_noise = false;
+  p.noise_estimation_method = SPECBLEACH_NOISE_ESTIMATION_SPP_MMSE;
+  p.masking_depth = 0.5f;
+  p.suppression_strength = 1.0f;
+  p.aggressiveness = 0.0f;
+  p.tonal_reduction_gain = 0.1f;
+  p.transient_protection_enable = false;
+  p.noise_profile_scale = 1.0f;
+  p.reduction_curve_bias = NULL;
+  p.reduction_curve_enabled = false;
+  p.reduction_curve_size = 0;
+  p.tonal_noise_profile_scale = 1.0f;
+  p.reduction_blend = 0.0f;
+  return p;
+}
+
+static uint32_t init_overlap_factor(uint32_t flags) {
+  return (flags & SPECBLEACH_INIT_LOW_LATENCY) ? LOW_LATENCY_OVERLAP_FACTOR
+                                               : OVERLAP_FACTOR;
+}
+
+static bool rebuild_engines(SbDenoiserInstance* self) {
+  if (self->spectral_engine) {
+    spectral_engine_free(self->spectral_engine);
+    self->spectral_engine = NULL;
+  }
+  if (self->noise_profile) {
+    noise_profile_free(self->noise_profile);
+    self->noise_profile = NULL;
+  }
+  if (self->stft_processor) {
+    stft_processor_free(self->stft_processor);
+    self->stft_processor = NULL;
+  }
+  self->stft_processor = stft_processor_initialize(
+      self->sample_rate, self->frame_size_ms,
+      init_overlap_factor(self->init_flags), PADDING_CONFIGURATION,
+      ZEROPADDING_AMOUNT, INPUT_WINDOW_TYPE, OUTPUT_WINDOW_TYPE);
+  if (!self->stft_processor) {
+    return false;
+  }
+  const uint32_t fft_size = get_stft_fft_size(self->stft_processor);
+  self->fft_size = fft_size;
+  self->hop = get_stft_hop_size(self->stft_processor);
+  self->noise_profile = noise_profile_initialize(
+      get_stft_real_spectrum_size(self->stft_processor));
+  if (!self->noise_profile) {
+    return false;
+  }
+  self->spectral_engine = spectral_engine_initialize_with_hop(
+      self->sample_rate, fft_size, init_overlap_factor(self->init_flags),
+      self->hop, self->noise_profile,
+      (self->init_flags & SPECBLEACH_INIT_LOW_LATENCY) ? true : false);
+  return self->spectral_engine != NULL;
+}
+
+specbleach_denoiser* specbleach_denoiser_initialize(uint32_t sample_rate,
+                                                    float frame_size_ms,
+                                                    uint32_t flags) {
+  if (sample_rate == 0 || !isfinite(frame_size_ms) || frame_size_ms <= 0.0f) {
+    return NULL;
+  }
+
+  const double frame_samples =
+      ((double)frame_size_ms / 1000.0) * (double)sample_rate;
+  if (!isfinite(frame_samples) || frame_samples < 1.0 ||
+      frame_samples > (double)UINT32_MAX) {
+    return NULL;
+  }
+
+  SbDenoiserInstance* self =
+      (SbDenoiserInstance*)calloc(1U, sizeof(SbDenoiserInstance));
   if (!self) {
     return NULL;
   }
 
-  self->fft_size = fft_size;
-  self->real_spectrum_size = (self->fft_size / 2U) + 1U;
-  self->hop = self->fft_size / overlap_factor;
   self->sample_rate = sample_rate;
-  self->spectrum_type = SPECTRAL_TYPE_1D;
-  self->band_type = CRITICAL_BANDS_TYPE_1D;
-  self->default_oversubtraction = DEFAULT_OVERSUBTRACTION;
-  self->default_undersubtraction = DEFAULT_UNDERSUBTRACTION;
-  self->gain_calculation_type = GAIN_ESTIMATION_TYPE_1D;
-  self->time_smoothing_type = FIXED;
-
-  self->gain_spectrum = (float*)calloc(self->fft_size, sizeof(float));
-  if (!self->gain_spectrum) {
-    spectral_denoiser_free(self);
-    return NULL;
-  }
-  (void)initialize_spectrum_with_value(self->gain_spectrum, self->fft_size,
-                                       1.F);
-
-  self->alpha = (float*)calloc(self->real_spectrum_size, sizeof(float));
-  if (!self->alpha) {
-    spectral_denoiser_free(self);
-    return NULL;
-  }
-  (void)initialize_spectrum_with_value(self->alpha, self->real_spectrum_size,
-                                       1.F);
-
-  self->beta = (float*)calloc(self->real_spectrum_size, sizeof(float));
-  if (!self->beta) {
-    spectral_denoiser_free(self);
-    return NULL;
-  }
-
-  self->noise_profile = noise_profile;
-  self->noise_spectrum =
-      (float*)calloc(self->real_spectrum_size, sizeof(float));
-  if (!self->noise_spectrum) {
-    spectral_denoiser_free(self);
-    return NULL;
-  }
-
-  self->manual_noise_floor =
-      (float*)calloc(self->real_spectrum_size, sizeof(float));
-  if (!self->manual_noise_floor) {
-    spectral_denoiser_free(self);
-    return NULL;
-  }
-
-  self->tonal_reducer = tonal_reducer_initialize(
-      self->real_spectrum_size, self->sample_rate, self->fft_size);
-  if (!self->tonal_reducer) {
-    spectral_denoiser_free(self);
-    return NULL;
-  }
-
-  self->noise_estimator =
-      noise_estimation_initialize(self->fft_size, noise_profile);
-  if (!self->noise_estimator) {
-    spectral_denoiser_free(self);
-    return NULL;
-  }
-
-  self->spectral_features =
-      spectral_features_initialize(self->real_spectrum_size);
-  if (!self->spectral_features) {
-    spectral_denoiser_free(self);
-    return NULL;
-  }
-
-  self->spectrum_smoothing = spectral_smoothing_initialize(
-      self->fft_size, self->sample_rate, self->time_smoothing_type);
-  if (!self->spectrum_smoothing) {
-    spectral_denoiser_free(self);
-    return NULL;
-  }
-
-  self->noise_floor_manager = noise_floor_manager_initialize(self->fft_size);
-
-  self->was_learning = false;
-  self->aggressiveness = 0.0f;
-  self->denoise_parameters.tonal_reduction = 0.0f;
-
-  self->masking_veto = masking_veto_initialize(
-      self->fft_size, self->sample_rate, CRITICAL_BANDS_TYPE_1D,
-      self->spectrum_type, false, USE_TEMPORAL_MASKING_1D_DEFAULT);
-  self->suppression_engine = suppression_engine_initialize(
-      self->real_spectrum_size, self->sample_rate, self->band_type,
-      self->spectrum_type, true, USE_TEMPORAL_MASKING_1D_DEFAULT);
-
-  if (!self->noise_floor_manager || !self->masking_veto ||
-      !self->suppression_engine) {
-    spectral_denoiser_free(self);
+  self->frame_size_ms = frame_size_ms;
+  self->frame_size_samples = (uint32_t)frame_samples;
+  self->init_flags = flags;
+  if (!rebuild_engines(self)) {
+    specbleach_denoiser_free(self);
     return NULL;
   }
 
   return self;
 }
 
-void spectral_denoiser_free(SpectralProcessorHandle instance) {
-  SbSpectralDenoiser* self = (SbSpectralDenoiser*)instance;
+void specbleach_denoiser_free(specbleach_denoiser* instance) {
+  SbDenoiserInstance* self = instance;
 
   if (!self) {
     return;
   }
 
-  // Don't free noise profile used as reference here
-
-  if (self->noise_estimator) {
-    noise_estimation_free(self->noise_estimator);
+  if (self->spectral_engine) {
+    spectral_engine_free(self->spectral_engine);
   }
-  if (self->adaptive_estimator) {
-    adaptive_estimator_free(self->adaptive_estimator);
+  if (self->noise_profile) {
+    noise_profile_free(self->noise_profile);
   }
-  if (self->spectral_features) {
-    spectral_features_free(self->spectral_features);
+  if (self->stft_processor) {
+    stft_processor_free(self->stft_processor);
   }
-  if (self->spectrum_smoothing) {
-    spectral_smoothing_free(self->spectrum_smoothing);
-  }
-  if (self->masking_veto) {
-    masking_veto_free(self->masking_veto);
-  }
-  if (self->suppression_engine) {
-    suppression_engine_free(self->suppression_engine);
-  }
-  if (self->gain_spectrum) {
-    free(self->gain_spectrum);
-  }
-
-  if (self->noise_floor_manager) {
-    noise_floor_manager_free(self->noise_floor_manager);
-  }
-  if (self->alpha) {
-    free(self->alpha);
-  }
-  if (self->beta) {
-    free(self->beta);
-  }
-  if (self->noise_spectrum) {
-    free(self->noise_spectrum);
-  }
-  if (self->manual_noise_floor) {
-    free(self->manual_noise_floor);
-  }
-
-  if (self->tonal_reducer) {
-    tonal_reducer_free(self->tonal_reducer);
+  if (self->reduction_curve_copy) {
+    free(self->reduction_curve_copy);
   }
 
   free(self);
 }
 
-bool load_reduction_parameters(SpectralProcessorHandle instance,
-                               DenoiserParameters parameters) {
-  if (!instance) {
+uint32_t specbleach_denoiser_get_latency(const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+
+  if (!self || !self->stft_processor) {
+    return 0;
+  }
+
+  uint32_t stft_latency = get_stft_latency(self->stft_processor);
+  uint32_t denoiser_latency_frames =
+      spectral_engine_get_latency_frames(self->spectral_engine);
+  uint32_t denoiser_latency_samples = denoiser_latency_frames * self->hop;
+
+  return stft_latency + denoiser_latency_samples;
+}
+
+bool specbleach_denoiser_process(specbleach_denoiser* instance,
+                                 uint32_t number_of_samples, const float* input,
+                                 float* output) {
+  SbDenoiserInstance* self = instance;
+  if (!instance || !input || !output) {
+    return false;
+  }
+  if (number_of_samples == 0) {
     return false;
   }
 
-  SbSpectralDenoiser* self = (SbSpectralDenoiser*)instance;
-
-  // Check if we need to initialize or re-initialize the adaptive estimator
-  if (parameters.adaptive_noise) {
-    AdaptiveNoiseEstimationMethod requested_method =
-        (AdaptiveNoiseEstimationMethod)parameters.noise_estimation_method;
-
-    bool needs_init = !self->adaptive_estimator ||
-                      adaptive_estimator_get_method(self->adaptive_estimator) !=
-                          requested_method;
-
-    if (needs_init) {
-      adaptive_estimator_free(self->adaptive_estimator);
-      self->adaptive_estimator = adaptive_estimator_initialize(
-          self->real_spectrum_size, self->sample_rate, self->fft_size,
-          requested_method);
-      self->last_adaptive_state = 0;
-    }
-  }
-
-  self->denoise_parameters = parameters;
-  self->aggressiveness = parameters.aggressiveness;
+  stft_processor_run(self->stft_processor, number_of_samples, input, output,
+                     &spectral_engine_run, self->spectral_engine);
 
   return true;
 }
 
-bool spectral_denoiser_run(SpectralProcessorHandle instance,
-                           float* fft_spectrum) {
-  if (!fft_spectrum || !instance) {
+uint32_t specbleach_denoiser_get_sample_rate(
+    const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+  return self ? self->sample_rate : 0;
+}
+
+uint32_t specbleach_denoiser_get_frame_size(
+    const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+  return self ? self->frame_size_samples : 0;
+}
+
+uint32_t specbleach_denoiser_get_fft_size(const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+  return self ? self->fft_size : 0;
+}
+
+uint32_t specbleach_denoiser_get_hop_size(const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+  return self ? self->hop : 0;
+}
+
+uint32_t specbleach_denoiser_get_noise_profile_size(
+    const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+  return (self && self->noise_profile)
+             ? get_noise_profile_size(self->noise_profile)
+             : 0;
+}
+
+bool specbleach_denoiser_load_noise_profile_for_mode(
+    specbleach_denoiser* instance, const float* restored_profile,
+    const uint32_t profile_size, const uint32_t block_count,
+    const SpecbleachProfileMode mode) {
+  SbDenoiserInstance* self = instance;
+  if (!self || !self->noise_profile || !restored_profile) {
+    return false;
+  }
+  if (mode < SPECBLEACH_PROFILE_MODE_FIRST ||
+      mode > SPECBLEACH_PROFILE_MODE_LAST) {
     return false;
   }
 
-  SbSpectralDenoiser* self = (SbSpectralDenoiser*)instance;
-
-  // 1. Preparation: Get reference spectrum and handle learning mode
-  float* reference_spectrum =
-      get_spectral_feature(self->spectral_features, fft_spectrum,
-                           self->fft_size, self->spectrum_type);
-
-  if (denoiser_profile_core_handle_learning_mode(
-          self->noise_estimator, reference_spectrum,
-          self->denoise_parameters.learn_noise, &self->was_learning)) {
-    return true;
+  if (profile_size != get_noise_profile_size(self->noise_profile)) {
+    return false;
   }
 
-  // 2. Noise Estimation: Update noise profile (Adaptive or Manual)
-  DenoiserProfileCoreParams profile_params = {
-      .adaptive_enabled = self->denoise_parameters.adaptive_noise,
-      .spectrum_size = self->real_spectrum_size,
-      .aggressiveness = &self->aggressiveness,
-      .param_aggressiveness = self->denoise_parameters.aggressiveness,
-      .last_adaptive_state = &self->last_adaptive_state,
-      .adaptive_estimator = self->adaptive_estimator,
-      .noise_profile = self->noise_profile,
-      .manual_noise_floor = self->manual_noise_floor,
-      .noise_spectrum = self->noise_spectrum,
-  };
-  denoiser_profile_core_update(profile_params, reference_spectrum);
+  return set_noise_profile(self->noise_profile, (int)mode, restored_profile,
+                           profile_size, block_count);
+}
 
-  // 3. Denoising Stage: Calculate gains and apply psychoacoustic constraints
+bool specbleach_denoiser_load_noise_profile_resampled(
+    specbleach_denoiser* instance, const float* restored_profile,
+    const uint32_t source_size, const uint32_t block_count,
+    const SpecbleachProfileMode mode) {
+  const SbDenoiserInstance* self = instance;
+  if (!self || !self->noise_profile || !restored_profile || source_size == 0) {
+    return false;
+  }
+  if (mode < SPECBLEACH_PROFILE_MODE_FIRST ||
+      mode > SPECBLEACH_PROFILE_MODE_LAST) {
+    return false;
+  }
+  const uint32_t native_size = get_noise_profile_size(self->noise_profile);
+  if (source_size == native_size) {
+    return specbleach_denoiser_load_noise_profile_for_mode(
+        instance, restored_profile, source_size, block_count, mode);
+  }
+  float* tmp = (float*)malloc(native_size * sizeof(float));
+  if (!tmp) {
+    return false;
+  }
+  // ponytail: linear interpolation, caller's curve if higher quality needed
+  for (uint32_t i = 0; i < native_size; ++i) {
+    const float pos =
+        (native_size == 1)
+            ? 0.0f
+            : ((float)i * (float)(source_size - 1) / (float)(native_size - 1));
+    const uint32_t lo = (uint32_t)pos;
+    const uint32_t hi = lo + 1 < source_size ? lo + 1 : lo;
+    const float frac = pos - (float)lo;
+    tmp[i] = restored_profile[lo] * (1.0f - frac) + restored_profile[hi] * frac;
+  }
+  const bool ok = specbleach_denoiser_load_noise_profile_for_mode(
+      instance, tmp, native_size, block_count, mode);
+  free(tmp);
+  return ok;
+}
 
-  // 3.1. Calculate SNR-dependent oversubtraction factors (Alpha/Beta)
-  SuppressionParameters suppression_params = {
-      .type = SUPPRESSION_BEROUTI_PER_BIN,
-      .strength = self->denoise_parameters.suppression_strength,
-      .undersubtraction = 0.0F};
-  suppression_engine_calculate(self->suppression_engine, reference_spectrum,
-                               self->noise_spectrum, suppression_params,
-                               self->alpha, self->beta);
+void specbleach_denoiser_reset_noise_profile(specbleach_denoiser* instance) {
+  SbDenoiserInstance* self = instance;
+  if (!self) {
+    return;
+  }
+  if (self->spectral_engine) {
+    spectral_engine_reset_noise_profile(self->spectral_engine);
+  }
+  if (self->noise_profile) {
+    reset_noise_profile(self->noise_profile);
+  }
+}
 
-  // 3.2. Detect tonal components and boost alpha at tonal bins
-  tonal_reducer_run(self->tonal_reducer, self->noise_spectrum,
-                    get_noise_profile(self->noise_profile, MAX),
-                    get_noise_profile(self->noise_profile, MEDIAN), self->alpha,
-                    self->denoise_parameters.tonal_reduction);
+bool specbleach_denoiser_reset_dsp_state(specbleach_denoiser* instance) {
+  SbDenoiserInstance* self = instance;
+  if (!self) {
+    return false;
+  }
+  return rebuild_engines(self);
+}
 
-  // 3.3. Apply temporal smoothing to the input spectrum
-  TimeSmoothingParameters spectral_smoothing_parameters =
-      (TimeSmoothingParameters){
-          .smoothing = self->denoise_parameters.smoothing_factor,
-      };
-  spectral_smoothing_run(self->spectrum_smoothing,
-                         spectral_smoothing_parameters, reference_spectrum);
+uint32_t specbleach_denoiser_get_noise_profile_block_count_for_mode(
+    const specbleach_denoiser* instance, SpecbleachProfileMode mode) {
+  const SbDenoiserInstance* self = instance;
+  if (!self || !self->noise_profile || mode < SPECBLEACH_PROFILE_MODE_FIRST ||
+      mode > SPECBLEACH_PROFILE_MODE_LAST) {
+    return 0;
+  }
+  return get_noise_profile_block_count(self->noise_profile, (int)mode);
+}
 
-  // 3.4. Apply Structural Veto to rescue transients and moderate artifacts
-  masking_veto_apply(self->masking_veto, reference_spectrum,
-                     self->noise_spectrum, NULL, self->alpha,
-                     self->denoise_parameters.masking_depth);
+const float* specbleach_denoiser_get_noise_profile_for_mode(
+    const specbleach_denoiser* instance, SpecbleachProfileMode mode) {
+  const SbDenoiserInstance* self = instance;
+  if (!self || !self->noise_profile || mode < SPECBLEACH_PROFILE_MODE_FIRST ||
+      mode > SPECBLEACH_PROFILE_MODE_LAST) {
+    return NULL;
+  }
+  return get_noise_profile(self->noise_profile, (int)mode);
+}
 
-  // 3.5. Final Gain Calculation
-  calculate_gains(self->real_spectrum_size, self->fft_size, reference_spectrum,
-                  self->noise_spectrum, self->gain_spectrum, self->alpha,
-                  self->beta, self->gain_calculation_type);
+bool specbleach_denoiser_noise_profile_available_for_mode(
+    const specbleach_denoiser* instance, SpecbleachProfileMode mode) {
+  const SbDenoiserInstance* self = instance;
+  if (!self || !self->noise_profile || mode < SPECBLEACH_PROFILE_MODE_FIRST ||
+      mode > SPECBLEACH_PROFILE_MODE_LAST) {
+    return false;
+  }
+  return is_noise_estimation_available(self->noise_profile, (int)mode);
+}
 
-  // 4. Post-Processing: Final gain management and mixing
-  DenoiserPostProcessParams post_params = {
-      .fft_size = self->fft_size,
-      .real_spectrum_size = self->real_spectrum_size,
-      .reduction_amount = self->denoise_parameters.reduction_amount,
-      .tonal_reduction = self->denoise_parameters.tonal_reduction,
-      .whitening_factor = self->denoise_parameters.whitening_factor,
-      .residual_listen = self->denoise_parameters.residual_listen,
-      .noise_floor_manager = self->noise_floor_manager,
-      .tonal_reducer = self->tonal_reducer,
-      .gain_spectrum = self->gain_spectrum,
-      .noise_spectrum = self->noise_spectrum,
-      .fft_spectrum = fft_spectrum,
-  };
-  denoiser_post_process_apply(post_params);
+bool specbleach_denoiser_has_any_profile(const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+  if (!self || !self->noise_profile) {
+    return false;
+  }
+  for (int mode = SPECBLEACH_PROFILE_MODE_FIRST;
+       mode <= SPECBLEACH_PROFILE_MODE_LAST; ++mode) {
+    if (is_noise_estimation_available(self->noise_profile, mode)) {
+      return true;
+    }
+  }
+  return false;
+}
 
-  return true;
+bool specbleach_denoiser_load_parameters(
+    specbleach_denoiser* instance,
+    const SpecbleachDenoiserParameters* parameters, uint32_t parameters_size) {
+  SbDenoiserInstance* self = instance;
+  if (!instance || !parameters) {
+    return false;
+  }
+  if (parameters_size != sizeof(SpecbleachDenoiserParameters)) {
+    return false;
+  }
+
+  const uint32_t profile_size = get_noise_profile_size(self->noise_profile);
+  if (parameters->reduction_curve_enabled &&
+      parameters->reduction_curve_size != profile_size) {
+    return false;
+  }
+
+  if (parameters->reduction_curve_enabled &&
+      parameters->reduction_curve_bias == NULL) {
+    return false;
+  }
+
+  const float* owned_bias = curve_bias_copy(
+      &self->reduction_curve_copy, &self->reduction_curve_capacity,
+      profile_size, parameters->reduction_curve_enabled,
+      parameters->reduction_curve_bias);
+  if (parameters->reduction_curve_enabled && !owned_bias) {
+    return false;
+  }
+
+  SpectralEngineParameters denoise_parameters =
+      sanitize_engine_parameters(parameters);
+  denoise_parameters.reduction_curve_bias = owned_bias;
+  if ((self->init_flags & SPECBLEACH_INIT_LOW_LATENCY) != 0u) {
+    denoise_parameters.smoothing_mode = SPECBLEACH_SMOOTHING_TEMPORAL;
+  }
+
+  return spectral_engine_load_parameters(self->spectral_engine,
+                                         denoise_parameters);
+}
+
+const float* specbleach_denoiser_get_tonal_mask(
+    const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+  return self ? spectral_engine_get_tonal_mask(self->spectral_engine) : NULL;
+}
+
+uint32_t specbleach_denoiser_get_tonal_peaks(
+    const specbleach_denoiser* instance, float* peak_freqs_hz,
+    uint32_t max_peaks) {
+  const SbDenoiserInstance* self = instance;
+  return self ? spectral_engine_get_peaks(self->spectral_engine, peak_freqs_hz,
+                                          max_peaks)
+              : 0;
+}
+
+const float* specbleach_denoiser_get_active_noise_profile(
+    const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+  return self ? spectral_engine_get_active_noise_profile(self->spectral_engine)
+              : NULL;
+}
+
+bool specbleach_denoiser_is_transient_detected(
+    const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+  return self ? spectral_engine_is_transient_detected(self->spectral_engine)
+              : false;
+}
+
+float specbleach_denoiser_get_transient_intensity(
+    const specbleach_denoiser* instance) {
+  const SbDenoiserInstance* self = instance;
+  return self ? spectral_engine_get_transient_intensity(self->spectral_engine)
+              : 0.0f;
 }

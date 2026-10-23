@@ -1,4 +1,24 @@
 /*
+libspecbleach - A spectral processing library
+
+Copyright 2022 Luciano Dato <lucianodato@gmail.com>
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+/*
  * Unit tests for Martin (2001) Minimum Statistics Noise Estimator
  */
 
@@ -33,6 +53,10 @@ void test_martin_initialization(void) {
   MartinNoiseEstimator* est =
       martin_noise_estimator_initialize(real_size, sr, fft_size);
   TEST_ASSERT(est != NULL, "Initialization should succeed");
+
+  martin_noise_estimator_set_hop_sec(NULL, 0.0115F); // must not crash
+  martin_noise_estimator_set_hop_sec(est, 0.0115F);
+  martin_noise_estimator_set_hop_sec(est, 0.0F); // edge: ignored
 
   martin_noise_estimator_free(est);
   martin_noise_estimator_free(NULL); // Should be safe

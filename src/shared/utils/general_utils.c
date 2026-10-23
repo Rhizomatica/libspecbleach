@@ -31,24 +31,23 @@ float sanitize_denormal(float value) {
 }
 
 float from_db_to_coefficient(const float value_db) {
-  return expf(value_db / 20.F * logf(10.F));
-}
-
-float remap_percentage_log_like_unity(const float value) {
-  return 1.F - expf(-3.F * (value));
+  return powf(10.0F, value_db / 20.0F);
 }
 
 int get_next_divisible_two(int number) {
-  int q = number / 2;
-  int n1 = 2 * q;
-  int n2 = (number * 2) > 0 ? (2 * (q + 1)) : (2 * (q - 1));
-  if (abs(number - n1) < abs(number - n2)) {
-    return n1;
-  }
-
-  return n2;
+  return number + (number & 1);
 }
 
 int get_next_power_two(int number) {
-  return (int)roundf(powf(2.F, ceilf(log2f((float)number))));
+  if (number <= 0) {
+    return 1;
+  }
+  number--;
+  number |= number >> 1;
+  number |= number >> 2;
+  number |= number >> 4;
+  number |= number >> 8;
+  number |= number >> 16;
+  number++;
+  return number;
 }

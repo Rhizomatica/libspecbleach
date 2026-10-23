@@ -1,11 +1,11 @@
 # libspecbleach
 
 [![build](https://github.com/lucianodato/libspecbleach/actions/workflows/build.yml/badge.svg)](https://github.com/lucianodato/libspecbleach/actions/workflows/build.yml)
-[![codecov](https://codecov.io/gh/lucianodato/libspecbleach/branch/main/graph/badge.svg)](https://codecov.io/gh/lucianodato/libspecbleach)
-[![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/lucianodato/libspecbleach?utm_source=oss&utm_medium=github&utm_campaign=lucianodato%2Flibspecbleach&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=lucianodato_libspecbleach&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=lucianodato_libspecbleach)
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/lucianodato/libspecbleach?utm_source=oss&utm_medium=github&utm_campaign=lucianodato%2Flibspecbleach&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 [![License: LGPL v2.1](https://img.shields.io/badge/License-LGPL%20v2.1-blue.svg)](https://www.gnu.org/licenses/lgpl-2.1)
 
-C library for audio noise reduction and other spectral effects
+C library for audio noise reduction and other spectral effects.
 
 ## Table of Contents
 
@@ -13,6 +13,8 @@ C library for audio noise reduction and other spectral effects
 - [De-noise Algorithms](#de-noise-algorithms)
 - [Build](#build)
 - [Installation](#installation)
+- [Build Options](#build-options)
+- [Quick Integration](#quick-integration)
 - [Usage Examples](#usage-examples)
 - [Development](#development)
 - [Contributing](#contributing)
@@ -20,9 +22,9 @@ C library for audio noise reduction and other spectral effects
 
 ## Background
 
-This library is a standalone, modular spectral processing engine originally based on [noise-repellent](https://github.com/lucianodato/noise-repellent). It decouples the DSP algorithms from any specific plugin API (like LV2), allowing for easy integration into various applications.
+This library is a standalone, modular spectral processing engine originally extracted from [noise-repellent](https://github.com/lucianodato/noise-repellent). It decouples DSP algorithms from any specific plugin framework, allowing for clean integration into C/C++ audio software.
 
-The core architecture uses a unified spectral processor concept. The library currently implements advanced spectral denoising using efficient circular buffering (`SbSpectralCircularBuffer`) and modern STFT processing. It is designed to be extensible, supporting future additions like de-crackle or de-click algorithms.
+The core architecture uses a unified spectral processor concept. The library is fully self-contained with zero external runtime dependencies—it includes a built-in worker pool for deterministic multi-threaded 2D denoising, efficient circular buffering (`SbSpectralCircularBuffer`), and vendored [PFFFT](https://github.com/marton78/pffft) for fast SIMD-accelerated spectral transforms. It is designed to be extensible, supporting future additions like de-crackle or de-click algorithms.
 
 ## De-noise Algorithms
 
@@ -32,8 +34,8 @@ The library implements a sophisticated spectral gating algorithm enhanced by sev
 The fundamental noise reduction method uses spectral subtraction with proprietary framing and windowing to minimize artifacts.
 
 ### 2. 2D Denoising (Time-Frequency Filtering)
-A Non-Local Means (NLM) algorithm filters the spectrogram in both time and frequency domains simultaneously. This preserving structural details of the signal while reducing musical noise and "burbling" artifacts often associated with simple spectral subtraction.
-*Note: This feature is computationally intensive and requires SIMD optimization (enabled in Release builds).*
+A Non-Local Means (NLM) algorithm filters the spectrogram in both time and frequency domains simultaneously. This preserves structural details of the signal while reducing musical noise and "burbling" artifacts often associated with simple spectral subtraction.
+*Note: This feature is computationally intensive and benefits from SIMD acceleration (enabled in Release builds).*
 
 ### 3. Masking Veto
 To preserve transients and prevent over-processing, a psychoacoustic masking model estimates the auditory masking threshold. If the signal components are strong enough to mask the noise naturally, the "veto" system prevents unnecessary noise reduction, preserving the natural character of the audio.
@@ -45,72 +47,143 @@ Specialized handling for tonal noise components allows for more aggressive reduc
 The whitening feature (noise floor recovery) has been refined to be transparent at 0dB reduction, ensuring that the noise floor texture is natural and consistent with the reduction amount.
 
 ### 6. Adaptive Estimation
-In addition to manual noise profile capture, the library supports adaptive noise usage for changing noise environments.
+In addition to manual noise profile capture, the library supports adaptive noise floor estimation using algorithms like SPP-MMSE, Brandt, and Martin Minimum Statistics.
 
 ## Build
 
-If you wish to compile yourself and install the library you will need:
-- A C compiling toolchain (GCC or Clang)
-- [Meson](https://mesonbuild.com/) build system (0.60.0 or newer)
-- [Ninja](https://ninja-build.org/) build tool
-- [FFTW3](http://www.fftw.org/) library (float version)
-- [OpenMP](https://www.openmp.org/) for parallel processing
-- [libsndfile](https://github.com/libsndfile/libsndfile) (optional, for examples)
+To compile and install `libspecbleach`, you will need:
+- A C compiling toolchain (GCC or Clang supporting C17)
+- [CMake](https://cmake.org/) (3.16 or newer)
+- A threading library (pthreads on POSIX; built-in on Windows)
+- [libsndfile](https://github.com/libsndfile/libsndfile) (optional, for test suite and demo tools)
 
 ## Installation
 
 ```bash
 git clone https://github.com/lucianodato/libspecbleach.git
 cd libspecbleach
-meson setup build --buildtype=release
-meson compile -C build
-sudo meson install -C build
+
+# Configure build (defaults to shared library)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+# Compile
+cmake --build build --config Release --parallel
+
+# Install system-wide (installs libspecbleach.so, headers, and specbleach.pc)
+sudo cmake --install build
 ```
+
+> **Pkg-config Support**: System installation installs `specbleach.pc` into your system's `pkgconfig` directory (e.g., `/usr/lib/pkgconfig`). Downstream applications can discover the library using `pkg-config --modversion specbleach` or CMake's `pkg_check_modules()`.
 
 ## Build Options
 
-You can configure the build using `-Doption=value`:
+You can configure the build using `-Doption=VALUE`:
 
-- `enable_examples`: Build example applications (default: `false`). Requires `libsndfile`.
-- `enable_tests`: Build unit and integration tests (default: `false`). Requires `libsndfile`.
-- `static_deps`: Link internal dependencies (like FFTW3) statically (default: `false`). Useful for creating self-contained libraries.
-- `custom_warning_level`: 0-3 (default: `2`). Controls compiler warning verbosity.
-- `treat_warnings_as_errors`: Treat compiler warnings as errors (default: `false`).
-- `enable_sanitizers`: Enable sanitizers in debug builds (default: `false`).
-- `sanitize_address`: Enable AddressSanitizer (default: `false`).
-- `sanitize_undefined`: Enable UndefinedBehaviorSanitizer (default: `false`).
-- `lv2dir`: Install directory for LV2 bundles (absolute path or relative to prefix) (default: '').
+| Option | Default | Description |
+| :--- | :--- | :--- |
+| `BUILD_SHARED_LIBS` | `ON` | Build shared library (`.so` / `.dylib` / `.dll`) instead of static library |
+| `SPECBLEACH_INSTALL` | `ON` | Enable installation rules for library binaries, headers, and package config (`.pc`, `.cmake`) |
+| `ENABLE_AVX` | `ON` | Enable AVX SIMD optimizations on x86_64 architectures |
+| `ENABLE_TESTS` | `OFF` | Build unit, integration, and audio regression test suite |
+| `ENABLE_COVERAGE` | `OFF` | Enable code coverage instrumentation |
+| `ENABLE_EXAMPLES` | `OFF` | Build demo executables (requires `libsndfile`) |
+| `ENABLE_SANITIZERS` | `OFF` | Enable AddressSanitizer and UndefinedBehaviorSanitizer |
+
 
 > [!IMPORTANT]
-> **Critical Performance Note for Packagers**: The advanced "2D Denoising" (NLM) feature is computationally intensive and relies heavily on SIMD vectorization, function inlining, and **multi-core parallelization via OpenMP**. 
+> **Performance Note for Packagers & Users**: The advanced "2D Denoising" (NLM) feature is computationally intensive and relies heavily on SIMD vectorization and multi-core parallelization through a **built-in worker pool** (no external threading runtime required).
 >
-> You **MUST** compile with `--buildtype=release` (or `-O3`) to ensure usability. Debug or unoptimized builds will result in excessive CPU usage and audio dropouts/xruns.
+> The pool is created internally when the NLM smoother is initialized (owned by the spectral denoiser) and dispatches work with static, contiguous partitioning, keeping output deterministic across runs. Thread count defaults to 4 (see `NLM_NUM_THREADS_DEFAULT` in `src/shared/configurations.h`) and can be tuned per instance through `NlmFilterConfig::num_threads`.
 >
-> **Note on DSP Usage**: In DAW environments (like Ardour), the multi-threaded NLM processing may cause the DSP meter to show high usage peaks during the processing cycle. 
-> 
-> The library defaults to **4 threads** for NLM processing if not specified. You can fine-tune the thread usage using the `OMP_NUM_THREADS` environment variable (e.g., `export OMP_NUM_THREADS=2`). Lower thread counts will result in lower DSP peaks but higher total processing time per buffer.
+> You **MUST** configure with `-DCMAKE_BUILD_TYPE=Release` (or the compiler's equivalent optimization settings) for real-time performance. Debug or unoptimized builds will result in high CPU load.
 
-Example for a static build with examples:
+### Example: Building Static Library with Tests and Examples
 ```bash
-meson setup build -Dstatic_deps=true -Denable_examples=true
-meson compile -C build
+cmake -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DENABLE_TESTS=ON \
+  -DENABLE_EXAMPLES=ON
+
+cmake --build build --config Release --parallel
 ```
+
+## Quick Integration
+
+```c
+#include <specbleach_denoiser.h>
+
+// 1. CREATE — one instance per channel; frame_size_ms = STFT window (20-100)
+specbleach_denoiser* denoiser =
+    specbleach_denoiser_initialize(sample_rate, 46.0f, 0u);
+
+// Report latency to your host for delay compensation (stable after init)
+uint32_t latency = specbleach_denoiser_get_latency(denoiser);
+
+// 2. CONFIGURE — start from safe defaults; library copies everything
+SpecbleachDenoiserParameters p = specbleach_denoiser_get_default_parameters();
+p.learn_noise = SPECBLEACH_LEARN_ALL;
+p.reduction_gain = 0.1f;                          // -20 dB
+specbleach_denoiser_load_parameters(denoiser, &p, sizeof(p));
+
+// 3. LEARN — feed blocks containing only noise (RT-safe call)
+specbleach_denoiser_process(denoiser, nframes, in, out);
+
+// 4. FINALIZE — profiles are only usable after learning turns OFF
+p.learn_noise = SPECBLEACH_LEARN_OFF;
+specbleach_denoiser_load_parameters(denoiser, &p, sizeof(p));
+
+// 5. REDUCE — same call shape forever after; any block size (RT-safe)
+specbleach_denoiser_process(denoiser, nframes, in, out);
+
+// 6. CLEANUP (setup thread only, not RT-safe)
+specbleach_denoiser_free(denoiser);
+```
+
+Buffers are plain planar float arrays of `nframes` length; output may alias
+input. `_process` is real-time safe (no allocations, locks, or I/O);
+parameter loads and create/destroy are not. A complete zero-dependency
+example lives in [`examples/simple_embed.c`](examples/simple_embed.c).
+
+### Low-Latency Mode
+
+For live use (live hosts), pass `SPECBLEACH_INIT_LOW_LATENCY`
+at init with a 512-sample frame (`512*1000/sample_rate` ms). The denoiser
+goes causal: the NLM look-ahead is removed and NLM/DFTT smoothing requests
+are clamped to 1D temporal, so total latency equals the STFT frame alone —
+~10.7 ms at 48 kHz, ~11.6 ms at 44.1 kHz (both under 20 ms). The frame
+runs at 8x overlap (64-sample hop, Hann/Hann) for agile gain updates;
+reported latency stays one frame:
+
+```c
+float frame_ms = 512.0f * 1000.0f / (float)sample_rate;
+specbleach_denoiser* denoiser = specbleach_denoiser_initialize(
+    sample_rate, frame_ms, SPECBLEACH_INIT_LOW_LATENCY);
+// get_latency() reports 512: re-query once and compensate downstream.
+```
+
+Rules: the flag is init-time only (it changes latency/geometry, so it
+cannot ride `load_parameters`); masking veto and transient protection stay
+fully active (both are causal); zeropadding a 512 frame buys no real
+frequency resolution (interpolation only) and is not recommended —
+prefer the native 512 frame. `flags = 0` preserves the default
+full-latency behavior bit-for-bit.
 
 ## Usage Examples
 
-Simple console apps examples are provided to demonstrate how to use the library. It needs libsndfile to compile successfully. You can build them with:
+Console demo applications demonstrate library usage. They require `libsndfile` to build:
 
 ```bash
-meson setup build --buildtype=release -Denable_examples=true
-meson compile -C build
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_EXAMPLES=ON
+cmake --build build --parallel
 ```
 
 ### Manual Noise Profile
 
-To process a file using a manually captured noise profile (first N frames):
+To process an audio file using a manually captured noise profile (first N frames):
 
 ```bash
-./build/example/denoiser_demo --learn-frames 10 input.wav output.wav
+./build/denoiser_demo --learn-frames 10 input.wav output.wav
 ```
 
 ### Adaptive Mode
@@ -118,13 +191,13 @@ To process a file using a manually captured noise profile (first N frames):
 To use the adaptive noise estimator:
 
 ```bash
-./build/example/denoiser_demo --adaptive input.wav output.wav
+./build/denoiser_demo --adaptive input.wav output.wav
 ```
 
 ### Full Options
 
 ```bash
-./build/example/denoiser_demo \
+./build/denoiser_demo \
   --adaptive \
   --reduction 20 \
   --whitening 50 \
@@ -132,48 +205,39 @@ To use the adaptive noise estimator:
   input.wav output.wav
 ```
 
-It will recognize any libsndfile supported format.
-
 ## Development
 
 ### Building for Development
 
-For development builds with debugging symbols:
+For development builds with debug symbols and full test suite:
 
 ```bash
-meson setup build --buildtype=debug
-meson compile -C build
+cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DENABLE_EXAMPLES=ON
+cmake --build build --parallel
 ```
 
 ### Code Formatting
 
-The project uses `clang-format` for code formatting. To format the code:
+The project uses `clang-format`. Format modified C files before submitting:
 
 ```bash
-meson compile format -C build
+find src include -type f \( -name "*.c" -o -name "*.h" \) | xargs clang-format -i
 ```
 
 ### Running Tests
 
-If tests are enabled:
+Run the full CTest suite:
 
 ```bash
-meson setup build -Denable_tests=true
-meson test -C build
+ctest --test-dir build --output-on-failure
 ```
 
-### Coverage
-
-To generate coverage reports locally, you will need `gcovr` or `lcov` installed.
+Or run individual test executables:
 
 ```bash
-meson setup build --buildtype=debug -Db_coverage=true
-meson compile -C build
-meson test -C build
-ninja -C build coverage-html
+./build/test_integration
+./build/test_audio_file_regression # requires libsndfile
 ```
-
-The report will be available in `build/meson-logs/coveragereport/index.html`.
 
 ## License
 

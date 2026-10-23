@@ -31,6 +31,14 @@ struct NoiseProfile {
   bool noise_spectrum_available[NOISE_PROFILE_MODES];
 };
 
+static bool noise_profile_mode_index(int mode, uint32_t* index) {
+  if (mode < 1 || mode > NOISE_PROFILE_MODES) {
+    return false;
+  }
+  *index = (uint32_t)(mode - 1);
+  return true;
+}
+
 NoiseProfile* noise_profile_initialize(const uint32_t size) {
   NoiseProfile* self = (NoiseProfile*)calloc(1U, sizeof(NoiseProfile));
   if (!self) {
@@ -62,44 +70,48 @@ void noise_profile_free(NoiseProfile* self) {
   }
 }
 
-bool is_noise_estimation_available(NoiseProfile* self, int mode) {
-  if (mode < 1 || mode > 4) {
+bool is_noise_estimation_available(const NoiseProfile* self, int mode) {
+  uint32_t index;
+  if (!noise_profile_mode_index(mode, &index)) {
     return false;
   }
-  return self->noise_spectrum_available[mode - 1];
+  return self->noise_spectrum_available[index];
 }
 
-float* get_noise_profile(NoiseProfile* self, int mode) {
-  if (mode < 1 || mode > 4) {
+float* get_noise_profile(const NoiseProfile* self, int mode) {
+  uint32_t index;
+  if (!noise_profile_mode_index(mode, &index)) {
     return NULL;
   }
-  return self->noise_profiles[mode - 1];
+  return self->noise_profiles[index];
 }
 
-uint32_t get_noise_profile_size(NoiseProfile* self) {
+uint32_t get_noise_profile_size(const NoiseProfile* self) {
   return self->noise_profile_size;
 }
 
-uint32_t get_noise_profile_block_count(NoiseProfile* self, int mode) {
-  if (mode < 1 || mode > 4) {
+uint32_t get_noise_profile_block_count(const NoiseProfile* self, int mode) {
+  uint32_t index;
+  if (!noise_profile_mode_index(mode, &index)) {
     return 0;
   }
-  return self->noise_profile_block_count[mode - 1];
+  return self->noise_profile_block_count[index];
 }
 void set_noise_profile_available(NoiseProfile* self, int mode) {
-  if (mode >= 1 && mode <= 4) {
-    self->noise_spectrum_available[mode - 1] = true;
+  uint32_t index;
+  if (noise_profile_mode_index(mode, &index)) {
+    self->noise_spectrum_available[index] = true;
   }
 }
 
 bool set_noise_profile(NoiseProfile* self, int mode, const float* noise_profile,
                        const uint32_t noise_profile_size,
                        const uint32_t block_count) {
-  if (!self || mode < 1 || mode > 4 || !noise_profile ||
+  uint32_t index;
+  if (!self || !noise_profile_mode_index(mode, &index) || !noise_profile ||
       noise_profile_size != self->noise_profile_size) {
     return false;
   }
-  int index = mode - 1;
   memcpy(self->noise_profiles[index], noise_profile,
          noise_profile_size * sizeof(float));
 
@@ -110,11 +122,11 @@ bool set_noise_profile(NoiseProfile* self, int mode, const float* noise_profile,
 }
 
 bool increment_block_count(NoiseProfile* self, int mode) {
-  if (!self || mode < 1 || mode > 4) {
+  uint32_t index;
+  if (!self || !noise_profile_mode_index(mode, &index)) {
     return false;
   }
 
-  int index = mode - 1;
   self->noise_profile_block_count[index]++;
 
   if (self->noise_profile_block_count[index] >
@@ -132,8 +144,8 @@ bool reset_noise_profile(NoiseProfile* self) {
   }
 
   for (int i = 0; i < NOISE_PROFILE_MODES; i++) {
-    (void)initialize_spectrum_with_value(self->noise_profiles[i],
-                                         self->noise_profile_size, 0.F);
+    memset(self->noise_profiles[i], 0,
+           self->noise_profile_size * sizeof(float));
     self->noise_profile_block_count[i] = 0U;
     self->noise_spectrum_available[i] = false;
   }

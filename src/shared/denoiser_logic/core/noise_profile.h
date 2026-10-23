@@ -27,18 +27,18 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 typedef struct NoiseProfile NoiseProfile;
 
 #define NOISE_PROFILE_MODES                                                    \
-  4 // ROLLING_MEAN, MEDIAN, MAX, MINIMUM (no OFF storage needed)
+  4 // ROLLING_MEAN, MEDIAN, STD_DEV, CV_MASK (no OFF storage needed)
 
 NoiseProfile* noise_profile_initialize(uint32_t size);
 void noise_profile_free(NoiseProfile* self);
-float* get_noise_profile(NoiseProfile* self, int mode);
-uint32_t get_noise_profile_size(NoiseProfile* self);
-uint32_t get_noise_profile_block_count(NoiseProfile* self, int mode);
+float* get_noise_profile(const NoiseProfile* self, int mode);
+uint32_t get_noise_profile_size(const NoiseProfile* self);
+uint32_t get_noise_profile_block_count(const NoiseProfile* self, int mode);
 bool increment_block_count(NoiseProfile* self, int mode);
 bool set_noise_profile(NoiseProfile* self, int mode, const float* noise_profile,
                        uint32_t noise_profile_size, uint32_t block_count);
 void set_noise_profile_available(NoiseProfile* self, int mode);
 bool reset_noise_profile(NoiseProfile* self);
-bool is_noise_estimation_available(NoiseProfile* self, int mode);
+bool is_noise_estimation_available(const NoiseProfile* self, int mode);
 
 #endif // SHARED_DENOISER_LOGIC_NOISE_PROFILE_H

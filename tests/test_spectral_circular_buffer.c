@@ -1,4 +1,24 @@
 /*
+libspecbleach - A spectral processing library
+
+Copyright 2022 Luciano Dato <lucianodato@gmail.com>
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+/*
  * Unit tests for the SbSpectralCircularBuffer module
  */
 
@@ -141,13 +161,34 @@ void test_circular_buffer_edge_cases(void) {
   spectral_circular_buffer_push(NULL, layer0, NULL);
   TEST_ASSERT(spectral_circular_buffer_retrieve(NULL, layer0, 0) == NULL,
               "NULL handle retrieve");
-  TEST_ASSERT(spectral_circular_buffer_retrieve(cb, 99, 0) == NULL,
-              "Invalid layer id retrieve");
+  TEST_ASSERT(spectral_circular_buffer_retrieve(cb, 999, 0) == NULL,
+              "Out of bounds layer retrieve");
   spectral_circular_buffer_advance(NULL);
 
   spectral_circular_buffer_free(cb);
   spectral_circular_buffer_free(NULL);
   printf("✓ Edge cases passed\n");
+}
+
+void test_circular_buffer_clear(void) {
+  printf("Testing circular buffer clear...\n");
+
+  SbSpectralCircularBuffer* cb = spectral_circular_buffer_create(4);
+  uint32_t layer0 = spectral_circular_buffer_add_layer(cb, 2);
+  float data[2] = {10.0f, 20.0f};
+
+  spectral_circular_buffer_push(cb, layer0, data);
+  spectral_circular_buffer_advance(cb);
+  spectral_circular_buffer_clear(cb);
+
+  float* retrieved = spectral_circular_buffer_retrieve(cb, layer0, 0);
+  TEST_ASSERT(retrieved != NULL, "Retrieve after clear should succeed");
+  TEST_FLOAT_CLOSE(retrieved[0], 0.0f, 1e-6f);
+  TEST_FLOAT_CLOSE(retrieved[1], 0.0f, 1e-6f);
+
+  spectral_circular_buffer_clear(NULL);
+  spectral_circular_buffer_free(cb);
+  printf("✓ Clear passed\n");
 }
 
 int main(void) {
@@ -157,6 +198,7 @@ int main(void) {
   test_circular_buffer_push_retrieve();
   test_circular_buffer_delay_alignment();
   test_circular_buffer_edge_cases();
+  test_circular_buffer_clear();
 
   printf("\n✅ All spectral circular buffer tests passed!\n");
   return 0;

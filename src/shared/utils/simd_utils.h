@@ -21,8 +21,25 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #ifndef SHARED_UTILS_SIMD_UTILS_H
 #define SHARED_UTILS_SIMD_UTILS_H
 
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
+
+#if defined(_M_X64) || defined(_M_AMD64) ||                                    \
+    (defined(_M_IX86_FP) && _M_IX86_FP >= 1)
+#ifndef __SSE__
+#define __SSE__ 1
+#endif
+#ifndef __SSE2__
+#define __SSE2__ 1
+#endif
+#endif
+
+#if defined(_M_AVX) || defined(_M_AVX2)
+#ifndef __AVX__
+#define __AVX__ 1
+#endif
+#endif
 
 #ifdef __ARM_NEON
 #include <arm_neon.h>
@@ -36,8 +53,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #endif
 #endif
 
-#ifdef __GNUC__
+#if defined(__GNUC__) || defined(__clang__)
 #define SB_SIMD_INLINE static inline __attribute__((unused))
+#elif defined(_MSC_VER)
+#define SB_SIMD_INLINE static __inline
 #else
 #define SB_SIMD_INLINE static inline
 #endif
@@ -101,11 +120,13 @@ SB_SIMD_INLINE void sb_simd_restore_state(sb_simd_state_t state) {
 typedef __m256 sb_vec8_t;
 #elif defined(__SSE__)
 typedef struct {
-  __m128 v1, v2;
+  __m128 v1;
+  __m128 v2;
 } sb_vec8_t;
 #elif defined(__ARM_NEON)
 typedef struct {
-  float32x4_t v1, v2;
+  float32x4_t v1;
+  float32x4_t v2;
 } sb_vec8_t;
 #else
 typedef struct {
@@ -185,6 +206,43 @@ SB_SIMD_INLINE float sb_vec8_ssd(sb_vec8_t a, sb_vec8_t b) {
     ssd += d * d;
   }
   return ssd;
+#endif
+}
+
+/**
+ * Horizontally sums all 8 lanes of an 8-wide vector.
+ */
+SB_SIMD_INLINE float sb_vec8_hsum(sb_vec8_t v) {
+#ifdef __AVX__
+  __m128 low = _mm256_castps256_ps128(v);
+  __m128 high = _mm256_extractf128_ps(v, 1);
+  __m128 sum128 = _mm_add_ps(low, high);
+  __m128 shuf = _mm_shuffle_ps(sum128, sum128, _MM_SHUFFLE(2, 3, 0, 1));
+  __m128 sums = _mm_add_ps(sum128, shuf);
+  shuf = _mm_movehl_ps(shuf, sums);
+  sums = _mm_add_ss(sums, shuf);
+  float f;
+  _mm_store_ss(&f, sums);
+  return f;
+#elif defined(__SSE__)
+  __m128 sum = _mm_add_ps(v.v1, v.v2);
+  __m128 shuf = _mm_shuffle_ps(sum, sum, _MM_SHUFFLE(2, 3, 0, 1));
+  __m128 sums = _mm_add_ps(sum, shuf);
+  shuf = _mm_movehl_ps(shuf, sums);
+  sums = _mm_add_ss(sums, shuf);
+  float f;
+  _mm_store_ss(&f, sums);
+  return f;
+#elif defined(__ARM_NEON)
+  float32x4_t sum = vaddq_f32(v.v1, v.v2);
+  return vgetq_lane_f32(sum, 0) + vgetq_lane_f32(sum, 1) +
+         vgetq_lane_f32(sum, 2) + vgetq_lane_f32(sum, 3);
+#else
+  float s = 0.0f;
+  for (int i = 0; i < 8; i++) {
+    s += v.v[i];
+  }
+  return s;
 #endif
 }
 
@@ -385,6 +443,54 @@ SB_SIMD_INLINE sb_vec8_t sb_div8(sb_vec8_t a, sb_vec8_t b) {
 #endif
 }
 
+SB_SIMD_INLINE sb_vec8_t sb_sqrt8(sb_vec8_t a) {
+#ifdef __AVX__
+  return _mm256_sqrt_ps(a);
+#elif defined(__SSE__)
+  sb_vec8_t r;
+  r.v1 = _mm_sqrt_ps(a.v1);
+  r.v2 = _mm_sqrt_ps(a.v2);
+  return r;
+#elif defined(__ARM_NEON)
+#ifdef __aarch64__
+  sb_vec8_t r;
+  r.v1 = vsqrtq_f32(a.v1);
+  r.v2 = vsqrtq_f32(a.v2);
+  return r;
+#else
+  sb_vec8_t r;
+  float32x4_t zero = vdupq_n_f32(0.0f);
+  // cppcheck-suppress duplicateExpression ; intentional NaN (0/0)
+  float32x4_t nan_val = vdupq_n_f32(0.0f / 0.0f);
+
+  // Process a.v1
+  float32x4_t e1 = vrsqrteq_f32(a.v1);
+  e1 = vmulq_f32(e1, vrsqrtsq_f32(vmulq_f32(a.v1, e1), e1));
+  e1 = vmulq_f32(e1, vrsqrtsq_f32(vmulq_f32(a.v1, e1), e1));
+  float32x4_t s1 = vmulq_f32(a.v1, e1);
+  s1 = vbslq_f32(vceqq_f32(a.v1, zero), zero, s1);
+  r.v1 = vbslq_f32(vcltq_f32(a.v1, zero), nan_val,
+                   vbslq_f32(vcgtq_f32(a.v1, zero), s1, a.v1));
+
+  // Process a.v2
+  float32x4_t e2 = vrsqrteq_f32(a.v2);
+  e2 = vmulq_f32(e2, vrsqrtsq_f32(vmulq_f32(a.v2, e2), e2));
+  e2 = vmulq_f32(e2, vrsqrtsq_f32(vmulq_f32(a.v2, e2), e2));
+  float32x4_t s2 = vmulq_f32(a.v2, e2);
+  s2 = vbslq_f32(vceqq_f32(a.v2, zero), zero, s2);
+  r.v2 = vbslq_f32(vcltq_f32(a.v2, zero), nan_val,
+                   vbslq_f32(vcgtq_f32(a.v2, zero), s2, a.v2));
+
+  return r;
+#endif
+#else
+  sb_vec8_t r;
+  for (int i = 0; i < 8; i++)
+    r.v[i] = sqrtf(a.v[i]);
+  return r;
+#endif
+}
+
 SB_SIMD_INLINE sb_vec8_t sb_max8(sb_vec8_t a, sb_vec8_t b) {
 #ifdef __AVX__
   return _mm256_max_ps(a, b);
@@ -490,71 +596,6 @@ SB_SIMD_INLINE float sb_vec4_ssd(sb_vec4_t a, sb_vec4_t b) {
     ssd += d * d;
   }
   return ssd;
-#endif
-}
-
-/**
- * 4-Wide Arithmetic
- */
-SB_SIMD_INLINE sb_vec4_t sb_add4(sb_vec4_t a, sb_vec4_t b) {
-#if defined(__SSE__) || defined(__AVX__)
-  return _mm_add_ps(a, b);
-#elif defined(__ARM_NEON)
-  return vaddq_f32(a, b);
-#else
-  sb_vec4_t r;
-  for (int i = 0; i < 4; i++)
-    r.v[i] = a.v[i] + b.v[i];
-  return r;
-#endif
-}
-
-SB_SIMD_INLINE sb_vec4_t sb_sub4(sb_vec4_t a, sb_vec4_t b) {
-#if defined(__SSE__) || defined(__AVX__)
-  return _mm_sub_ps(a, b);
-#elif defined(__ARM_NEON)
-  return vsubq_f32(a, b);
-#else
-  sb_vec4_t r;
-  for (int i = 0; i < 4; i++)
-    r.v[i] = a.v[i] - b.v[i];
-  return r;
-#endif
-}
-
-SB_SIMD_INLINE sb_vec4_t sb_mul4(sb_vec4_t a, sb_vec4_t b) {
-#if defined(__SSE__) || defined(__AVX__)
-  return _mm_mul_ps(a, b);
-#elif defined(__ARM_NEON)
-  return vmulq_f32(a, b);
-#else
-  sb_vec4_t r;
-  for (int i = 0; i < 4; i++)
-    r.v[i] = a.v[i] * b.v[i];
-  return r;
-#endif
-}
-
-SB_SIMD_INLINE sb_vec4_t sb_set4(float f) {
-#if defined(__SSE__) || defined(__AVX__)
-  return _mm_set1_ps(f);
-#elif defined(__ARM_NEON)
-  return vdupq_n_f32(f);
-#else
-  sb_vec4_t r;
-  for (int i = 0; i < 4; i++)
-    r.v[i] = f;
-  return r;
-#endif
-}
-
-SB_SIMD_INLINE void sb_store4(float* p, sb_vec4_t v) {
-#if defined(__SSE__) || defined(__AVX__)
-  _mm_storeu_ps(p, v);
-#elif defined(__ARM_NEON)
-  vst1q_f32(p, v);
-#else
-  memcpy(p, v.v, 4 * sizeof(float));
 #endif
 }
 
@@ -679,7 +720,7 @@ SB_SIMD_INLINE float sb_fast_expf(float x) {
     uint32_t i;
     float f;
   } v;
-  v.i = (uint32_t)(12102203.0f * x + 1064866805.0f);
+  v.i = (uint32_t)((12102203.0f * x) + 1064866805.0f);
   return v.f;
 }
 

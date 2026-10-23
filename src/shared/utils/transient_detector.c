@@ -20,17 +20,16 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "transient_detector.h"
 #include "../configurations.h"
+#include "../frame_rate_norm.h"
 #include <math.h>
-#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-
-// Note: Transient detection constants are now imported from configurations.h
 
 struct TransientDetector {
   uint32_t num_items;
   float* smoothed_items;
   float alpha;
+  float decay_alpha;
   bool initialized;
 };
 
@@ -51,15 +50,120 @@ TransientDetector* transient_detector_initialize(const uint32_t num_items) {
   }
 
   self->alpha = TRANSIENT_SMOOTH_ALPHA;
+  self->decay_alpha = 0.50F;
   self->initialized = false;
 
   return self;
+}
+
+// Scan accumulators grouped so the per-band scan stays under the
+// parameter-count limit.
+typedef struct TdScanAccum {
+  float max_weight;
+  float sum_energy;
+  float transient_energy;
+  uint32_t active_bands_count;
+  uint32_t high_bands_count;
+} TdScanAccum;
+
+static void td_scan_bands(TransientDetector* self, const float* band_energies,
+                          float* onset_weights, uint32_t mid_high_start_band,
+                          TdScanAccum* accum) {
+  for (uint32_t j = 0; j < self->num_items; j++) {
+    const float current = band_energies[j];
+    const float smoothed = self->smoothed_items[j];
+
+    // Background tracking with asymmetric attack/decay:
+    // Minimum energy floor per band (0.05 linear amplitude sum over critical
+    // band bins)
+    const float min_band_energy = 0.05F;
+    const float base_floor = fmaxf(smoothed, min_band_energy);
+    const float ratio = (current - base_floor) / base_floor;
+
+    // Onset weight:
+    // Requires energy to be significantly above floor and at least +100%
+    // innovation jump
+    float weight = 0.0F;
+    if (current >= (min_band_energy * 2.0F) && ratio >= 1.0F) {
+      weight = (ratio - 1.0F) / 2.5F;
+      weight = fminf(fmaxf(weight, 0.0F), 1.0F);
+    }
+
+    if (weight >= 0.25F) {
+      accum->active_bands_count++;
+      if (j >= mid_high_start_band) {
+        accum->high_bands_count++;
+      }
+    }
+
+    if (onset_weights) {
+      onset_weights[j] = weight;
+    }
+
+    if (weight > accum->max_weight) {
+      accum->max_weight = weight;
+    }
+    accum->sum_energy += current;
+    accum->transient_energy += weight * current;
+
+    // Asymmetric background floor adaptation:
+    // - On attack (current > smoothed): adapt floor slower to preserve onset
+    //   contrast; - On decay/sustain: track smoothly downwards without lagging.
+    // Both alphas are frame-rate normalized via set_hop_sec (init-time only).
+    float adapt_alpha = (current > smoothed) ? self->alpha : self->decay_alpha;
+    self->smoothed_items[j] = (self->smoothed_items[j] * adapt_alpha) +
+                              (current * (1.0F - adapt_alpha));
+  }
+}
+
+static float td_score_intensity(const TransientDetector* self,
+                                const TdScanAccum* accum,
+                                uint32_t mid_high_start_band) {
+  // Discriminate against speech vowels / voiced phonemes vs genuine
+  // plosives/clicks/plucks: Voiced speech vowels have strong low-frequency
+  // formant surges with little to no high-frequency onset innovation. Genuine
+  // transients (mouth clicks, plucks, plosives, snaps) exhibit high-frequency
+  // onset energy across mid/high bands.
+  float hf_ratio = (self->num_items > mid_high_start_band)
+                       ? ((float)accum->high_bands_count /
+                          (float)(self->num_items - mid_high_start_band))
+                       : 0.0f;
+  float band_fraction =
+      (self->num_items > 0U)
+          ? ((float)accum->active_bands_count / (float)self->num_items)
+          : 0.0f;
+  float energy_fraction = (accum->sum_energy > MIN_INNOVATION_ENERGY)
+                              ? (accum->transient_energy / accum->sum_energy)
+                              : 0.0f;
+
+  // True transients: broadband onset OR high-frequency localized snap/click
+  float broadband_score = (0.55f * band_fraction) + (0.45f * energy_fraction);
+  // Localized HF click score: NO additive offset — requires genuine hf_ratio >
+  // 0 to score Fricative onsets hit only 1 upper band slowly; mouth clicks hit
+  // 2+ upper bands simultaneously
+  float localized_hf_score =
+      (accum->high_bands_count >= 2U) ? (accum->max_weight * hf_ratio) : 0.0f;
+  float intensity = fmaxf(broadband_score, localized_hf_score);
+
+  // If high frequency onset is completely absent and bandwidth is narrow
+  // (voiced vowel onset), suppress
+  if (accum->high_bands_count == 0 && band_fraction < 0.25f) {
+    intensity = 0.0f;
+  }
+
+  // Strict zeroing of weak/ambiguous background fluctuations
+  if (intensity < 0.25f && accum->max_weight < 0.70f) {
+    intensity = 0.0f;
+  }
+
+  return fminf(fmaxf(intensity, 0.0f), 1.0f);
 }
 
 void transient_detector_free(TransientDetector* self) {
   if (!self) {
     return;
   }
+
   free(self->smoothed_items);
 
   free(self);
@@ -67,8 +171,11 @@ void transient_detector_free(TransientDetector* self) {
 
 bool transient_detector_process(TransientDetector* self,
                                 const float* band_energies,
-                                float* onset_weights) {
+                                float* onset_weights, float* out_intensity) {
   if (!self || !band_energies) {
+    if (out_intensity) {
+      *out_intensity = 0.0f;
+    }
     return false;
   }
 
@@ -76,36 +183,50 @@ bool transient_detector_process(TransientDetector* self,
     memcpy(self->smoothed_items, band_energies,
            sizeof(float) * self->num_items);
     self->initialized = true;
-  }
-
-  bool transient_detected = false;
-
-  for (uint32_t j = 0; j < self->num_items; j++) {
-    const float current = band_energies[j];
-    const float smoothed = self->smoothed_items[j];
-
-    // Calculate Ratio (Innovation)
-    const float ratio = current / (smoothed + 1e-9F);
-
-    // Onset weight: 0.0 at ratio 1.0, 1.0 at ratio 1.25 (25% increase)
-    // We only trigger weight if the signal energy is significant
-    float weight = (ratio - 1.0F) / ONSET_RATIO_SENSITIVITY;
-    weight = (current < MIN_INNOVATION_ENERGY) ? 0.0F : weight;
-    weight = fminf(fmaxf(weight, 0.0F), 1.0F);
-
     if (onset_weights) {
-      onset_weights[j] = weight;
+      memset(onset_weights, 0, sizeof(float) * self->num_items);
     }
-
-    if (weight > 0.5F) {
-      transient_detected = true;
+    if (out_intensity) {
+      *out_intensity = 0.0f;
     }
-
-    // Update smoothing reference
-    float adapt_alpha = (weight > 0.0F) ? (self->alpha * 0.5F) : self->alpha;
-    self->smoothed_items[j] =
-        (current * (1.0F - adapt_alpha)) + (smoothed * adapt_alpha);
+    return false;
   }
 
-  return transient_detected;
+  TdScanAccum accum = {0};
+  uint32_t mid_high_start_band =
+      self->num_items / 3U; // upper 2/3 of critical spectrum
+
+  td_scan_bands(self, band_energies, onset_weights, mid_high_start_band,
+                &accum);
+
+  // Reject noise-only or silent frames:
+  if (accum.sum_energy < (0.05F * (float)self->num_items * 2.0F)) {
+    if (onset_weights) {
+      memset(onset_weights, 0, sizeof(float) * self->num_items);
+    }
+    if (out_intensity) {
+      *out_intensity = 0.0f;
+    }
+    return false;
+  }
+
+  float intensity = td_score_intensity(self, &accum, mid_high_start_band);
+
+  if (out_intensity) {
+    *out_intensity = intensity;
+  }
+
+  // Localized HF path requires 2+ upper bands with strong weight to avoid
+  // fricative false triggers
+  return (intensity >= 0.25f ||
+          (accum.max_weight >= 0.70f && accum.high_bands_count >= 2U));
+}
+
+void transient_detector_set_hop_sec(TransientDetector* self, float hop_sec) {
+  if (!self || !(hop_sec > 0.0F)) {
+    return;
+  }
+  self->alpha =
+      sb_alpha_retuned(TRANSIENT_SMOOTH_ALPHA, LEGACY_REF_HOP_SEC, hop_sec);
+  self->decay_alpha = sb_alpha_retuned(0.50F, LEGACY_REF_HOP_SEC, hop_sec);
 }

@@ -69,8 +69,18 @@ tests/test_data/*_denoised.wav
 .vscode/
 .cursor/
 .cache/
-.agent/
 
 # Other files
 *.log
 .DS_Store
+
+# Autoresearch
+autoresearch/audio_dataset
+autoresearch/research_data
+autoresearch/.env
+
+# Coverage
+.coverage
+*.gcov
+Testing/
+

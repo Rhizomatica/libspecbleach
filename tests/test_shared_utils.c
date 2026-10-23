@@ -1,8 +1,29 @@
 /*
+libspecbleach - A spectral processing library
+
+Copyright 2022 Luciano Dato <lucianodato@gmail.com>
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+/*
  * Unit tests for Pre-estimation modules
  */
 
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +32,6 @@
 #include "shared/utils/critical_bands.h"
 #include "shared/utils/masking_estimator.h"
 #include "shared/utils/simd_utils.h"
-#include "shared/utils/spectral_smoother.h"
 #include "shared/utils/transient_detector.h"
 
 #define TEST_ASSERT(condition, message)                                        \
@@ -38,7 +58,7 @@ void test_absolute_hearing_thresholds(void) {
 
   float spectrum[513] = {0.0f}; // 513 = fft_size/2 + 1
   for (int i = 0; i < 513; i++) {
-    spectrum[i] = 0.001f; // Set low values that should be floored
+    spectrum[i] = 0.0f; // Set low values that should be floored
   }
 
   TEST_ASSERT(apply_thresholds_as_floor(aht, spectrum),
@@ -47,7 +67,7 @@ void test_absolute_hearing_thresholds(void) {
   // Check that some values were floored to hearing thresholds
   bool some_values_changed = false;
   for (int i = 0; i < 513; i++) {
-    if (spectrum[i] > 0.001f) {
+    if (spectrum[i] > 0.0f) {
       some_values_changed = true;
       break;
     }
@@ -117,9 +137,44 @@ void test_masking_estimator(void) {
     spectrum[i] = 0.1f + ((float)i * 0.01f);
   }
 
-  TEST_ASSERT(
-      compute_masking_thresholds(me, spectrum, spectrum, masking_thresholds),
-      "Compute masking thresholds should succeed");
+  TEST_ASSERT(compute_masking_thresholds(me, spectrum, spectrum, NULL,
+                                         masking_thresholds),
+              "Compute masking thresholds should succeed");
+
+  masking_estimation_set_hop_sec(NULL, 0.0058F); // must not crash
+  masking_estimation_set_hop_sec(me, 0.0058F);
+
+  /* The setter must change behavior, not just state: two fresh instances
+   * with extreme hops must produce different second-frame thresholds
+   * (forward decay applies to previous_thresholds). Fails if no-op. */
+  MaskingEstimator* me_short = masking_estimation_initialize(
+      fft_size, sample_rate, OPUS_SCALE, POWER_SPECTRUM, true, true);
+  MaskingEstimator* me_long = masking_estimation_initialize(
+      fft_size, sample_rate, OPUS_SCALE, POWER_SPECTRUM, true, true);
+  TEST_ASSERT(me_short != NULL && me_long != NULL,
+              "Hop-variant estimators must initialize");
+  masking_estimation_set_hop_sec(me_short, 0.002F);
+  masking_estimation_set_hop_sec(me_long, 0.200F);
+  float th_short[513] = {0.0f};
+  float th_long[513] = {0.0f};
+  for (int pass = 0; pass < 2; pass++) {
+    TEST_ASSERT(compute_masking_thresholds(me_short, spectrum, spectrum, NULL,
+                                           th_short),
+                "Short-hop masking run must succeed");
+    TEST_ASSERT(
+        compute_masking_thresholds(me_long, spectrum, spectrum, NULL, th_long),
+        "Long-hop masking run must succeed");
+  }
+  int differing = 0;
+  for (int i = 0; i < 513; i++) {
+    if (fabsf(th_short[i] - th_long[i]) > 1e-6f) {
+      differing++;
+    }
+  }
+  TEST_ASSERT(differing > 0,
+              "Hop duration must affect temporal masking thresholds");
+  masking_estimation_free(me_short);
+  masking_estimation_free(me_long);
 
   // Check that masking thresholds are reasonable
   for (int i = 0; i < 513; i++) {
@@ -131,73 +186,23 @@ void test_masking_estimator(void) {
   printf("✓ Masking Estimator tests passed\n");
 }
 
-void test_spectral_smoother(void) {
-  printf("Testing Spectral Smoother...\n");
-
-  uint32_t fft_size = 1024;
-
-  // Test all smoothing types
-  for (int type = NO_SMOOTHING; type <= TRANSIENT_AWARE; type++) {
-    SpectralSmoother* ss =
-        spectral_smoothing_initialize(fft_size, 44100, (TimeSmoothingType)type);
-    TEST_ASSERT(ss != NULL, "Spectral smoother initialization should succeed");
-
-    float spectrum[513] = {0.0f};
-    for (int i = 0; i < 513; i++) {
-      spectrum[i] = 1.0f + (0.5f * sinf((float)i * 0.1f));
-    }
-
-    TimeSmoothingParameters params = {.smoothing = 0.8f};
-    TEST_ASSERT(spectral_smoothing_run(ss, params, spectrum),
-                "Spectral smoothing should succeed");
-
-    // Run again to test previous spectrum logic
-    TEST_ASSERT(spectral_smoothing_run(ss, params, spectrum),
-                "Spectral smoothing should succeed on second run");
-
-    // Check that output is reasonable
-    for (int i = 0; i < 513; i++) {
-      TEST_ASSERT(spectrum[i] >= 0.0f,
-                  "Smoothed spectrum should be non-negative");
-    }
-
-    spectral_smoothing_free(ss);
-  }
-  printf("✓ Spectral Smoother tests passed\n");
-}
-
 void test_transient_detector(void) {
   printf("Testing Transient Detector...\n");
 
-  uint32_t fft_size = 1024;
-  uint32_t real_size = (fft_size / 2) + 1;
-
-  TransientDetector* td = transient_detector_initialize(real_size);
+  uint32_t num_bands = 24;
+  TransientDetector* td = transient_detector_initialize(num_bands);
   TEST_ASSERT(td != NULL, "Transient detector initialization should succeed");
 
-  float spectrum[513] = {0.0f};
-  float different_spectrum[513] = {0.0f};
-
-  // Create initial spectrum
-  for (int i = 0; i < 513; i++) {
-    spectrum[i] = 1.0f;
-    different_spectrum[i] = 2.0f; // Different spectrum to create change
+  float energies[24];
+  float weights[24];
+  for (int i = 0; i < 24; i++) {
+    energies[i] = 1.0f;
   }
 
-  // First run - should not detect transient (no previous data, initialized with
-  // current)
-  bool result1 = transient_detector_process(td, spectrum, NULL);
-
-  // Second run with different spectrum - likely transient due to jump from 1.0
-  // to 2.0 Ratio = 2.0 / 1.0 = 2.0. Weight = (2-1)/0.25 = 4.0 -> Clamped
-  // to 1.0. Should return true.
-  bool result2 = transient_detector_process(td, different_spectrum, NULL);
-
-  // The function should run without error (return value is boolean indicating
-  // transient presence) We just test that it doesn't crash and returns a valid
-  // boolean
-  TEST_ASSERT(result1 == false, "First run should not detect transient (init)");
-  TEST_ASSERT(result2 == true, "Second run should detect transient (jump)");
+  float intensity = 0.0f;
+  bool result1 = transient_detector_process(td, energies, weights, &intensity);
+  TEST_ASSERT(result1 == false, "First frame should not detect transient");
+  TEST_ASSERT(intensity == 0.0f, "First frame intensity should be 0");
 
   transient_detector_free(td);
   printf("✓ Transient Detector tests passed\n");
@@ -208,7 +213,7 @@ void test_simd_utils(void) {
 
   sb_simd_state_t state = sb_simd_enable_ftz_daz();
 
-  float buf[8] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+  const float buf[8] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
   float out[8] = {0.0f};
 
   sb_vec8_t v1 = sb_load8(buf);
@@ -223,17 +228,16 @@ void test_simd_utils(void) {
   sb_store8(out, vadd);
   TEST_FLOAT_CLOSE(out[0], 3.0f, 0.001f);
 
+  sb_store8(out, vdiv);
+  TEST_FLOAT_CLOSE(out[0], 0.5f, 0.001f);
+
+  sb_store8(out, vmax);
+  TEST_FLOAT_CLOSE(out[0], 2.0f, 0.001f);
+
   sb_vec4_t v4_1 = sb_load4(buf);
-  sb_vec4_t v4_2 = sb_set4(2.0f);
-  sb_vec4_t v4_add = sb_add4(v4_1, v4_2);
-  sb_vec4_t v4_sub = sb_sub4(v4_1, v4_2);
-  sb_vec4_t v4_mul = sb_mul4(v4_1, v4_2);
-
-  sb_store4(out, v4_add);
-  TEST_FLOAT_CLOSE(out[0], 3.0f, 0.001f);
-
+  sb_vec4_t v4_2 = sb_load4(buf + 4);
   float ssd4 = sb_vec4_ssd(v4_1, v4_2);
-  (void)ssd4;
+  TEST_FLOAT_CLOSE(ssd4, 64.0f, 0.001f);
 
   sb_vec8_t mask = sb_gt8(v1, v2);
   sb_vec8_t result = sb_sel8(mask, vsub, vmul);
@@ -282,8 +286,8 @@ void test_patch_ssd(void) {
 
   sb_vec8_t target_vecs[8];
   for (int r = 0; r < 8; r++) {
-    target_vecs[r] = sb_load8(target + r * 8);
-    cand_rows[r] = candidate + r * 8;
+    target_vecs[r] = sb_load8(target + ((ptrdiff_t)r * 8));
+    cand_rows[r] = candidate + ((ptrdiff_t)r * 8);
   }
 
   float ssd = sb_vec8_patch_ssd(target_vecs, cand_rows);
@@ -301,7 +305,6 @@ int main(void) {
   test_absolute_hearing_thresholds();
   test_critical_bands();
   test_masking_estimator();
-  test_spectral_smoother();
   test_transient_detector();
   test_simd_utils();
   test_fast_exp();

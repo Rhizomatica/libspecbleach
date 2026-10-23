@@ -40,6 +40,10 @@ typedef struct DenoiserProfileCoreParams {
   NoiseProfile* noise_profile;
   float* manual_noise_floor;
   float* noise_spectrum; // Output buffer
+  NoiseEstimator* noise_estimator;
+  float noise_profile_offset_linear; // Linear scalar shift for noise threshold
+  float tonal_noise_profile_offset_linear; // Linear scalar shift at tonal bins
+  const float* tonal_mask; // Previous frame tonal mask (may be NULL)
 } DenoiserProfileCoreParams;
 
 /**
@@ -54,7 +58,7 @@ typedef struct DenoiserProfileCoreParams {
  * otherwise.
  */
 bool denoiser_profile_core_handle_learning_mode(NoiseEstimator* noise_estimator,
-                                                float* reference_spectrum,
+                                                const float* reference_spectrum,
                                                 int learn_noise_flag,
                                                 bool* was_learning);
 

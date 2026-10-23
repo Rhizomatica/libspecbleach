@@ -31,17 +31,21 @@ typedef enum NoiseEstimatorType {
   OFF = 0,
   ROLLING_MEAN = 1,
   MEDIAN = 2,
-  MAX = 3,
-  MINIMUM = 4
+  STD_DEV = 3,
+  CV_MASK = 4
 } NoiseEstimatorType;
 
 NoiseEstimator* noise_estimation_initialize(uint32_t fft_size,
                                             NoiseProfile* noise_profile);
 void noise_estimation_free(NoiseEstimator* self);
+void noise_estimation_reset(NoiseEstimator* self);
 bool noise_estimation_run(NoiseEstimator* self,
                           NoiseEstimatorType noise_estimator_type,
-                          float* signal_spectrum);
+                          const float* signal_spectrum);
 void noise_estimation_finalize(NoiseEstimator* self,
                                NoiseEstimatorType noise_estimator_type);
+
+/* Init-time only: retune median window / update interval for hop duration. */
+void noise_estimation_set_hop_sec(NoiseEstimator* self, float hop_sec);
 
 #endif // SHARED_DENOISER_LOGIC_NOISE_ESTIMATOR_H

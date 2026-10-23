@@ -1,4 +1,24 @@
 /*
+libspecbleach - A spectral processing library
+
+Copyright 2022 Luciano Dato <lucianodato@gmail.com>
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+/*
  * Unit tests for SPP-MMSE Noise Estimator
  */
 
@@ -29,6 +49,10 @@ void test_spp_initialization(void) {
   SppMmseNoiseEstimator* est =
       spp_mmse_noise_estimator_initialize(real_size, 44100, 512);
   TEST_ASSERT(est != NULL, "Initialization should succeed");
+
+  spp_mmse_noise_estimator_set_hop_sec(NULL, 0.0115F); // must not crash
+  spp_mmse_noise_estimator_set_hop_sec(est, 0.0115F);
+  spp_mmse_noise_estimator_set_hop_sec(est, -1.0F); // edge: ignored
 
   spp_mmse_noise_estimator_free(est);
   spp_mmse_noise_estimator_free(NULL);

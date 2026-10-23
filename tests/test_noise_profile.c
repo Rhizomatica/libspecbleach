@@ -1,4 +1,24 @@
 /*
+libspecbleach - A spectral processing library
+
+Copyright 2022 Luciano Dato <lucianodato@gmail.com>
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+/*
  * Unit tests for Noise Profile functionality
  */
 
@@ -7,7 +27,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "shared/denoiser_logic/core/denoiser_profile_core.h"
 #include "shared/denoiser_logic/core/noise_profile.h"
+#include "shared/denoiser_logic/estimators/noise_estimator.h"
 
 #define TEST_ASSERT(condition, message)                                        \
   do {                                                                         \
@@ -217,6 +239,157 @@ void test_noise_profile_multiple_modes(void) {
   printf("✓ Noise Profile multiple modes tests passed\n");
 }
 
+void test_noise_profile_multi_section_accumulation(void) {
+  printf("Testing Noise Profile multi-section accumulation...\n");
+
+  uint32_t profile_size = 513;
+  NoiseProfile* np = noise_profile_initialize(profile_size);
+  TEST_ASSERT(np != NULL, "Noise profile initialization should succeed");
+
+  float profile_section1[513];
+  for (int i = 0; i < 513; i++) {
+    profile_section1[i] = 0.05f;
+  }
+
+  // Section 1 capture: 50 blocks
+  TEST_ASSERT(
+      set_noise_profile(np, 1, profile_section1, profile_size, 50) == true,
+      "Setting section 1 profile should succeed");
+  TEST_ASSERT(get_noise_profile_block_count(np, 1) == 50,
+              "Block count should be 50 after section 1");
+
+  // Section 2 capture: accumulation of 50 more blocks (total 100 blocks)
+  float profile_section2[513];
+  for (int i = 0; i < 513; i++) {
+    profile_section2[i] = 0.08f;
+  }
+
+  TEST_ASSERT(
+      set_noise_profile(np, 1, profile_section2, profile_size, 100) == true,
+      "Accumulating section 2 profile should succeed");
+  TEST_ASSERT(get_noise_profile_block_count(np, 1) == 100,
+              "Block count should accumulate to 100 after section 2");
+
+  float* read_profile = get_noise_profile(np, 1);
+  TEST_ASSERT(read_profile != NULL, "Profile in mode 1 should exist");
+  for (int i = 0; i < 513; i++) {
+    TEST_FLOAT_CLOSE(read_profile[i], 0.08f, 0.001f);
+  }
+
+  // Verify explicit reset clears accumulation
+  TEST_ASSERT(reset_noise_profile(np) == true, "Reset should succeed");
+  TEST_ASSERT(get_noise_profile_block_count(np, 1) == 0,
+              "Block count should be 0 after reset");
+  TEST_ASSERT(is_noise_estimation_available(np, 1) == false,
+              "Profile should not be available after reset");
+
+  noise_profile_free(np);
+  printf("✓ Noise Profile multi-section accumulation tests passed\n");
+}
+
+void test_denoiser_profile_core_offset(void) {
+  printf("Testing Denoiser Profile Core noise offset...\n");
+
+  uint32_t profile_size = 513;
+  NoiseProfile* np = noise_profile_initialize(profile_size);
+  float test_profile[513];
+  float noise_spectrum[513];
+  float ref_spectrum[513];
+  float manual_noise_floor[513];
+  int last_adaptive_state = 0;
+  float aggressiveness = 0.0f;
+
+  for (int i = 0; i < 513; i++) {
+    test_profile[i] = 1.0f;
+    noise_spectrum[i] = 1.0f;
+    ref_spectrum[i] = 1.0f;
+  }
+  set_noise_profile(np, 1, test_profile, profile_size, 10);
+  set_noise_profile(np, 2, test_profile, profile_size, 10);
+  set_noise_profile(np, 3, test_profile, profile_size, 10);
+  set_noise_profile(np, 4, test_profile, profile_size, 10);
+
+  DenoiserProfileCoreParams params = {
+      .spectrum_size = profile_size,
+      .noise_profile = np,
+      .adaptive_estimator = NULL,
+      .manual_noise_floor = manual_noise_floor,
+      .noise_spectrum = noise_spectrum,
+      .last_adaptive_state = &last_adaptive_state,
+      .aggressiveness = &aggressiveness,
+      .param_aggressiveness = 0.0f,
+      .adaptive_enabled = false,
+      .noise_profile_offset_linear = 2.0f,
+  };
+
+  denoiser_profile_core_update(params, ref_spectrum);
+
+  // Offset linear is 2.0f, so 1.0 * 2.0 = 2.0
+  for (int i = 0; i < 513; i++) {
+    TEST_FLOAT_CLOSE(noise_spectrum[i], 2.0f, 0.001f);
+  }
+
+  noise_profile_free(np);
+  printf("✓ Denoiser Profile Core noise offset tests passed\n");
+}
+
+void test_continual_multi_section_learning(void) {
+  printf("Testing continual multi-section learning through core handler...\n");
+
+  uint32_t fft_size = 1024;
+  uint32_t profile_size = (fft_size / 2) + 1;
+  NoiseProfile* np = noise_profile_initialize(profile_size);
+  NoiseEstimator* ne = noise_estimation_initialize(fft_size, np);
+  bool was_learning = false;
+
+  float frame1[513];
+  float frame2[513];
+  for (uint32_t i = 0; i < profile_size; i++) {
+    frame1[i] = 0.1f;
+    frame2[i] = 0.2f;
+  }
+
+  // Section 1: 10 frames of frame1
+  for (int i = 0; i < 10; i++) {
+    bool active = denoiser_profile_core_handle_learning_mode(ne, frame1, 1,
+                                                             &was_learning);
+    TEST_ASSERT(active == true, "Should be active learning in section 1");
+  }
+  // Stop section 1
+  bool active =
+      denoiser_profile_core_handle_learning_mode(ne, frame1, 0, &was_learning);
+  TEST_ASSERT(active == false, "Should be stopped after section 1");
+  TEST_ASSERT(get_noise_profile_block_count(np, 1) == 10,
+              "Block count should be 10");
+  TEST_ASSERT(is_noise_estimation_available(np, 1) == true,
+              "Rolling mean available");
+  TEST_ASSERT(is_noise_estimation_available(np, 3) == true,
+              "STD_DEV available");
+
+  // Section 2: 10 frames of frame2
+  for (int i = 0; i < 10; i++) {
+    active = denoiser_profile_core_handle_learning_mode(ne, frame2, 1,
+                                                        &was_learning);
+    TEST_ASSERT(active == true, "Should be active learning in section 2");
+  }
+  // Stop section 2
+  active =
+      denoiser_profile_core_handle_learning_mode(ne, frame2, 0, &was_learning);
+  TEST_ASSERT(active == false, "Should be stopped after section 2");
+  TEST_ASSERT(get_noise_profile_block_count(np, 1) == 20,
+              "Block count should accumulate to 20");
+  TEST_ASSERT(is_noise_estimation_available(np, 1) == true,
+              "Rolling mean available after section 2");
+  TEST_ASSERT(is_noise_estimation_available(np, 3) == true,
+              "STD_DEV available after section 2");
+  TEST_ASSERT(is_noise_estimation_available(np, 4) == true,
+              "CV_MASK available after section 2");
+
+  noise_estimation_free(ne);
+  noise_profile_free(np);
+  printf("✓ Continual multi-section learning tests passed\n");
+}
+
 int main(void) {
   printf("Running noise profile tests...\n");
 
@@ -226,6 +399,9 @@ int main(void) {
   test_noise_profile_increment_blocks();
   test_noise_profile_reset();
   test_noise_profile_multiple_modes();
+  test_noise_profile_multi_section_accumulation();
+  test_denoiser_profile_core_offset();
+  test_continual_multi_section_learning();
 
   printf("✅ All noise profile tests passed!\n");
   return 0;

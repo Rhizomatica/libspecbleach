@@ -20,6 +20,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "shared/denoiser_logic/core/noise_floor_manager.h"
 #include "shared/denoiser_logic/processing/spectral_whitening.h"
+#include "shared/utils/spectral_utils.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -74,13 +75,16 @@ void noise_floor_manager_free(NoiseFloorManager* self) {
   free(self);
 }
 
-void noise_floor_manager_apply(NoiseFloorManager* self,
-                               uint32_t real_spectrum_size, uint32_t fft_size,
-                               float* gain_spectrum, const float* noise_profile,
-                               float reduction_amount,
-                               float tonal_reduction_amount,
-                               const float* tonal_mask,
-                               float whitening_factor) {
+void noise_floor_manager_apply(NoiseFloorManager* self, NoiseFloorArgs args) {
+  uint32_t real_spectrum_size = args.real_spectrum_size;
+  uint32_t fft_size = args.fft_size;
+  float* gain_spectrum = args.gain_spectrum;
+  const float* noise_profile = args.noise_profile;
+  float reduction_amount = args.reduction_amount;
+  float tonal_reduction_amount = args.tonal_reduction_amount;
+  const float* tonal_mask = args.tonal_mask;
+  float whitening_factor = args.whitening_factor;
+  const float* reduction_curve_bias = args.reduction_curve_bias;
   if (!self || !gain_spectrum || !noise_profile) {
     return;
   }
@@ -97,47 +101,56 @@ void noise_floor_manager_apply(NoiseFloorManager* self,
     for (uint32_t k = 0U; k < real_spectrum_size; k++) {
       gain_spectrum[k] = 1.0f;
     }
-    for (uint32_t k = 1U; k < fft_size - k; k++) {
-      gain_spectrum[fft_size - k] = gain_spectrum[k];
-    }
+    sb_apply_spectral_symmetry(gain_spectrum, real_spectrum_size, fft_size);
     return;
   }
 
-  // 1. Calculate whitening weights (including tapering)
-  spectral_whitening_get_weights(self->whitening, whitening_factor,
-                                 noise_profile, self->whitening_weights);
+  // 1. Calculate ideal whitening reduction in dB
+  spectral_whitening_get_ideal_reduction_db(self->whitening, reduction_amount,
+                                            noise_profile,
+                                            self->whitening_weights);
 
   // 2. Apply biasing + frequency-dependent floor
   for (uint32_t k = 0U; k < real_spectrum_size; k++) {
-    float mask = (tonal_mask) ? tonal_mask[k] : 0.0f;
-    // Proportional interpolation between regular reduction and tonal reduction
-    // Note: These are already linear gains (0.0 to 1.0) passed from the loading
-    // layer.
+    float mask = tonal_mask ? tonal_mask[k] : 0.0f;
+    if (mask > 0.0f) {
+      mask = sqrtf(sqrtf(mask));
+    }
+
+    // Calculate the available reduction budget (in linear amplitude)
     float dual_path_reduction =
         (reduction_amount * (1.0f - mask)) + (tonal_reduction_amount * mask);
 
-    /*
-     * TONAL HAND-OFF:
-     * As whitening increases, we want to smooth out the "notches" created by
-     * tonal reduction to achieve a truly flat white residual.
-     * We interpolate between the dual-path reduction (with notches) and the
-     * broadband-only reduction level based on the whitening strength.
-     */
-    float target_reduction =
-        dual_path_reduction +
-        (whitening_factor * (reduction_amount - dual_path_reduction));
+    // Convert budget to dB
+    float r_dp_db = -20.0f * log10f(dual_path_reduction + 1e-12f);
+    if (r_dp_db < 0.0f) {
+      r_dp_db = 0.0f;
+    }
 
-    /*
-     * DYNAMIC WHITENING DEPTH & BIT TRANSPARENCY:
-     * To achieve bit transparency at 0dB reduction, we damp the whitening
-     * weights toward 1.0 as the target reduction level approaches 1.0 (no
-     * reduction). This also makes the effect feel more natural and dynamic.
-     */
-    float reduction_depth = 1.0f - target_reduction;
-    float effective_whitening_weight =
-        1.0f + (reduction_depth * (self->whitening_weights[k] - 1.0f));
+    // Apply per-frequency reduction curve bias
+    if (reduction_curve_bias) {
+      r_dp_db += reduction_curve_bias[k];
+      if (r_dp_db < 0.0f) {
+        r_dp_db = 0.0f;
+      }
+    }
 
-    float whitened_floor = target_reduction * effective_whitening_weight;
+    // Ideal reduction needed to perfectly flatten the profile
+    float ideal_db = self->whitening_weights[k];
+
+    // Cap the ideal reduction by the available budget to prevent digging holes
+    float flattened_db = ideal_db;
+    if (flattened_db > r_dp_db) {
+      flattened_db = r_dp_db;
+    }
+
+    // Interpolate between deep notches (0% whitening) and perfectly flat (100%
+    // whitening)
+    float target_db = ((1.0f - whitening_factor) * r_dp_db) +
+                      (whitening_factor * flattened_db);
+
+    // Convert back to linear floor
+    float whitened_floor = powf(10.0f, -target_db / 20.0f);
 
     // Safety clamp (Floor cannot exceed Unity Gain)
     if (whitened_floor > 1.0f) {
@@ -153,8 +166,5 @@ void noise_floor_manager_apply(NoiseFloorManager* self,
     gain_spectrum[k] = fmaxf(whitened_floor, gain_spectrum[k]);
   }
 
-  // 3. Symmetric copy
-  for (uint32_t k = 1U; k < fft_size - k; k++) {
-    gain_spectrum[fft_size - k] = gain_spectrum[k];
-  }
+  sb_apply_spectral_symmetry(gain_spectrum, real_spectrum_size, fft_size);
 }

@@ -24,6 +24,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "shared/utils/general_utils.h"
+
 typedef enum WindowTypes {
   HANN_WINDOW = 0,
   HAMMING_WINDOW = 1,
@@ -31,41 +33,31 @@ typedef enum WindowTypes {
   VORBIS_WINDOW = 3
 } WindowTypes;
 
+// WindowTypes must stay a dense 0..3 range (indexed by config and STFT code).
+_Static_assert(HANN_WINDOW >= 0 && HANN_WINDOW <= 3,
+               "HANN_WINDOW must be between 0 and 3");
+_Static_assert(HAMMING_WINDOW >= 0 && HAMMING_WINDOW <= 3,
+               "HAMMING_WINDOW must be between 0 and 3");
+_Static_assert(BLACKMAN_WINDOW >= 0 && BLACKMAN_WINDOW <= 3,
+               "BLACKMAN_WINDOW must be between 0 and 3");
+_Static_assert(VORBIS_WINDOW >= 0 && VORBIS_WINDOW <= 3,
+               "VORBIS_WINDOW must be between 0 and 3");
+
 bool get_fft_window(float* window, uint32_t fft_size, WindowTypes window_type);
 bool initialize_spectrum_with_value(float* spectrum, uint32_t spectrum_size,
                                     float value);
-bool direct_matrix_to_vector_spectral_convolution(const float* matrix_spectum,
-                                                  const float* spectrum,
-                                                  float* out_spectrum,
-                                                  uint32_t spectrum_size);
-float max_spectral_value(const float* spectrum, uint32_t real_spectrum_size);
-float min_spectral_value(const float* spectrum, uint32_t real_spectrum_size);
-
-#define min_spectrum(spectrum_one, spectrum_two, spectrum_size)                \
-  _Generic((spectrum_one),                                                     \
-      float*: min_spectrum_float,                                              \
-      double*: min_spectrum_double,                                            \
-      default: min_spectrum_float)(spectrum_one, spectrum_two, spectrum_size)
-
-#define max_spectrum(spectrum_one, spectrum_two, spectrum_size)                \
-  _Generic((spectrum_one),                                                     \
-      float*: max_spectrum_float,                                              \
-      double*: max_spectrum_double,                                            \
-      default: max_spectrum_float)(spectrum_one, spectrum_two, spectrum_size)
+bool min_spectrum(float* spectrum_one, const float* spectrum_two,
+                  uint32_t spectrum_size);
+bool max_spectrum(float* spectrum_one, const float* spectrum_two,
+                  uint32_t spectrum_size);
 
 bool min_spectrum_float(float* spectrum_one, const float* spectrum_two,
                         uint32_t spectrum_size);
 bool max_spectrum_float(float* spectrum_one, const float* spectrum_two,
                         uint32_t spectrum_size);
-bool min_spectrum_double(double* spectrum_one, const double* spectrum_two,
-                         uint32_t spectrum_size);
-bool max_spectrum_double(double* spectrum_one, const double* spectrum_two,
-                         uint32_t spectrum_size);
 float fft_bin_to_freq(uint32_t bin_index, uint32_t sample_rate,
                       uint32_t fft_size);
 uint32_t freq_to_fft_bin(float freq, uint32_t sample_rate, uint32_t fft_size);
-float spectral_flux(const float* spectrum, const float* previous_spectrum,
-                    uint32_t spectrum_size);
 bool get_rolling_mean_spectrum(float* averaged_spectrum,
                                const float* current_spectrum,
                                uint32_t number_of_blocks,
@@ -91,5 +83,21 @@ bool get_morphed_profile(float* output_profile, const float* mean_profile,
                          const float* median_profile, const float* max_profile,
                          const float* min_profile, uint32_t size,
                          float aggressiveness);
+/**
+ * @brief Extracts a broadband baseline envelope from a noise profile via
+ * morphological opening (erosion + dilation with a flat window, then a light
+ * smoothing pass). Narrowband tonal peaks are removed while the surrounding
+ * broadband level is preserved. O(N), no allocation; needs `scratch` of
+ * `size` floats. `window` must be <= TONAL_DETONE_MAX_BINS.
+ */
+bool sb_spectral_envelope_opening(const float* spectrum, float* scratch,
+                                  float* out, uint32_t size, uint32_t window);
+
+static inline SB_UNUSED void sb_apply_spectral_symmetry(
+    float* spectrum, uint32_t real_spectrum_size, uint32_t fft_size) {
+  for (uint32_t i = 1U; i < real_spectrum_size && i < (fft_size - i); i++) {
+    spectrum[fft_size - i] = spectrum[i];
+  }
+}
 
 #endif

@@ -1,7 +1,27 @@
+/*
+libspecbleach - A spectral processing library
+
+Copyright 2022 Luciano Dato <lucianodato@gmail.com>
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "processors/denoiser/spectral_denoiser.h"
+#include "processors/denoiser/spectral_engine.h"
 
 #include "shared/denoiser_logic/core/noise_floor_manager.h"
 #include "shared/denoiser_logic/core/noise_profile.h"
@@ -33,10 +53,11 @@ int main(void) {
 
   // 1. Core API
   printf("Testing Core API...\n");
-  specbleach_free(NULL);
-  SpectralBleachHandle sb = specbleach_initialize(sample_rate, 10.0f);
+  specbleach_denoiser_free(NULL);
+  specbleach_denoiser* sb =
+      specbleach_denoiser_initialize(sample_rate, 10.0f, 0u);
   if (sb) {
-    specbleach_free(sb);
+    specbleach_denoiser_free(sb);
   }
 
   // 2. Internal Modules
@@ -44,13 +65,17 @@ int main(void) {
 
   // Spectral Smoother
   spectral_smoothing_free(NULL);
-  SpectralSmoother* ss =
-      spectral_smoothing_initialize(fft_size, sample_rate, FIXED);
+  SpectralSmoother* ss = spectral_smoothing_initialize(fft_size, sample_rate,
+                                                       overlap_factor, FIXED);
+  spectral_smoothing_set_hop_samples(NULL, hop);
+  spectral_smoothing_set_hop_samples(ss, hop);
   spectral_smoothing_free(ss);
 
   // Transient Detector
   transient_detector_free(NULL);
   TransientDetector* td = transient_detector_initialize(fft_size);
+  transient_detector_set_hop_sec(NULL, 0.0058f);
+  transient_detector_set_hop_sec(td, 0.0058f);
   transient_detector_free(td);
 
   // Critical Bands
@@ -63,6 +88,8 @@ int main(void) {
   masking_estimation_free(NULL);
   MaskingEstimator* me = masking_estimation_initialize(
       fft_size, sample_rate, OPUS_SCALE, POWER_SPECTRUM, true, true);
+  masking_estimation_set_hop_sec(NULL, 0.0058f);
+  masking_estimation_set_hop_sec(me, 0.0058f);
   masking_estimation_free(me);
 
   // Absolute Hearing Thresholds
@@ -73,13 +100,22 @@ int main(void) {
 
   // Adaptive Noise Estimators
   adaptive_estimator_free(NULL);
+  adaptive_estimator_set_hop_sec(NULL, 0.0058f);
   AdaptiveNoiseEstimator* mar = adaptive_estimator_initialize(
       real_spectrum_size, sample_rate, fft_size, MARTIN_METHOD);
+  adaptive_estimator_set_hop_sec(mar, 0.0f); // edge: ignored
+  adaptive_estimator_set_hop_sec(mar, 0.0058f);
   adaptive_estimator_free(mar);
 
   AdaptiveNoiseEstimator* spp = adaptive_estimator_initialize(
       real_spectrum_size, sample_rate, fft_size, SPP_MMSE_METHOD);
+  adaptive_estimator_set_hop_sec(spp, 0.0058f);
   adaptive_estimator_free(spp);
+
+  AdaptiveNoiseEstimator* brd = adaptive_estimator_initialize(
+      real_spectrum_size, sample_rate, fft_size, BRANDT_METHOD);
+  adaptive_estimator_set_hop_sec(brd, 0.0058f);
+  adaptive_estimator_free(brd);
 
   // Noise Profile
   noise_profile_free(NULL);
@@ -88,6 +124,9 @@ int main(void) {
   // Noise Estimator (requires noise profile)
   noise_estimation_free(NULL);
   NoiseEstimator* ne = noise_estimation_initialize(fft_size, np);
+  noise_estimation_set_hop_sec(NULL, 0.0058f);
+  noise_estimation_set_hop_sec(ne, 0.0058f);
+  noise_estimation_set_hop_sec(ne, -1.0f); // edge: ignored
   noise_estimation_free(ne);
 
   noise_profile_free(np);
@@ -115,15 +154,25 @@ int main(void) {
 
   // FFT Transform (internal)
   fft_transform_free(NULL);
-  FftTransform* ft = fft_transform_initialize(fft_size, NO_PADDING, 0);
+  FftTransform* ft = fft_transform_initialize(fft_size, PAD_TO_VALID_SIZE, 0);
   fft_transform_free(ft);
 
   // STFT Processor
   stft_processor_free(NULL);
   StftProcessor* stft_p =
-      stft_processor_initialize(sample_rate, 10.0f, overlap_factor, NO_PADDING,
-                                0, HANN_WINDOW, HANN_WINDOW);
+      stft_processor_initialize(sample_rate, 10.0f, overlap_factor,
+                                PAD_TO_VALID_SIZE, 0, HANN_WINDOW, HANN_WINDOW);
   stft_processor_free(stft_p);
+
+  // Sub-hop frame (fewer samples than the overlap factor) must fail cleanly
+  StftProcessor* stft_zero_hop =
+      stft_processor_initialize(sample_rate, 0.05f, overlap_factor,
+                                PAD_TO_VALID_SIZE, 0, HANN_WINDOW, HANN_WINDOW);
+  if (stft_zero_hop != NULL) {
+    printf("FAIL: sub-hop STFT frame should return NULL\n");
+    stft_processor_free(stft_zero_hop);
+    return 1;
+  }
 
   // Spectral Features
   spectral_features_free(NULL);
@@ -133,11 +182,13 @@ int main(void) {
   // Suppression Engine
   suppression_engine_free(NULL);
   SuppressionEngine* se = suppression_engine_initialize(
-      real_spectrum_size, sample_rate, OPUS_SCALE, POWER_SPECTRUM, true, true);
+      real_spectrum_size, sample_rate, OPUS_SCALE);
+  suppression_engine_set_hop_sec(NULL, 0.0058f);
+  suppression_engine_set_hop_sec(se, 0.0058f);
   suppression_engine_free(se);
 
   // Internal Processors
-  spectral_denoiser_free(NULL);
+  spectral_engine_free(NULL);
 
   // Dispatcher Coverage (Extra)
   printf("Testing Adaptive Estimator Dispatcher...\n");

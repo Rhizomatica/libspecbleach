@@ -1,4 +1,24 @@
 /*
+libspecbleach - A spectral processing library
+
+Copyright 2022 Luciano Dato <lucianodato@gmail.com>
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+/*
  * Unit tests for Suppression Engine
  */
 
@@ -26,8 +46,8 @@ void test_suppression_engine_branches(void) {
 
   uint32_t size = 10;
   uint32_t sample_rate = 44100;
-  SuppressionEngine* se = suppression_engine_initialize(
-      size, sample_rate, OPUS_SCALE, POWER_SPECTRUM, true, true);
+  SuppressionEngine* se =
+      suppression_engine_initialize(size, sample_rate, OPUS_SCALE);
   TEST_ASSERT(se != NULL, "Init failed");
 
   float ref[10];
@@ -76,21 +96,11 @@ void test_suppression_engine_branches(void) {
   suppression_engine_calculate(se, ref, noise, params, alpha, beta);
   TEST_FLOAT_CLOSE(alpha[0], 4.0F, 0.001F);
 
-  // 5. Masking Thresholds
-  params.type = SUPPRESSION_MASKING_THRESHOLDS;
-  // High SNR/Masked -> High NMR -> Alpha = strength
-  for (uint32_t i = 0; i < size; i++) {
-    ref[i] = 10.0F;
-    noise[i] = 1e-12F;
-  }
-  suppression_engine_calculate(se, ref, noise, params, alpha, beta);
-  // Conservative masked alpha should be close to ALPHA_MIN + gap*0.1 = 1.0 +
-  // 3.0*0.1 = 1.3
-  TEST_FLOAT_CLOSE(alpha[0], 1.3F, 0.001F);
-
-  // 6. NULL guards
+  // 5. NULL guards
   suppression_engine_calculate(NULL, ref, noise, params, alpha, beta);
   suppression_engine_calculate(se, NULL, noise, params, alpha, beta);
+  suppression_engine_set_hop_sec(NULL, 0.0115F); // must not crash
+  suppression_engine_set_hop_sec(se, 0.0115F);
 
   suppression_engine_free(se);
   printf("✓ Suppression Engine tests passed\n");
